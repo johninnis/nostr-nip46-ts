@@ -1,6 +1,6 @@
 {
   "name": "@innis/nostr-nip46",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "license": "MIT",
   "description": "TypeScript NIP-46 (Nostr Connect / bunker) client and signer for Nostr — the client implements the canonical Signer interface from @innis/nostr-core so app code can't tell a remote bunker from a local key.",
   "exports": "./mod.ts",
@@ -11,7 +11,7 @@
   "imports": {
     "@std/assert": "jsr:@std/assert@^1",
     "@std/path": "jsr:@std/path@^1",
-    "@innis/nostr-core": "jsr:@innis/nostr-core@^0.2.3"
+    "@innis/nostr-core": "jsr:@innis/nostr-core@^0.2.12"
   },
   "tasks": {
     "check": "deno check mod.ts src/ tests/",
