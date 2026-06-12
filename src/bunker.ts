@@ -210,7 +210,12 @@ export const createNip46Bunker = ({ transport, signer, now = defaultNow }: Bunke
 
   const handleEvent = async (event: NostrEvent): Promise<void> => {
     if (!markSeen(event.id)) return
-    const decoded = await decryptEnvelopeJson({ signer, peerPubkey: event.pubkey, ciphertext: event.content })
+    const decoded = await decryptEnvelopeJson({
+      signer,
+      peerPubkey: event.pubkey,
+      ciphertext: event.content,
+      preferredCipher: clientEnvelopeCipher.get(event.pubkey) ?? "nip44",
+    })
     if (!decoded) return
     clientEnvelopeCipher.set(event.pubkey, decoded.cipher)
     evictOldest(clientEnvelopeCipher, CLIENT_CIPHER_LIMIT)

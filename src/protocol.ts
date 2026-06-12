@@ -70,6 +70,8 @@ interface DecryptEnvelopeParams {
   readonly signer: Signer
   readonly peerPubkey: PublicKey
   readonly ciphertext: string
+  /** Cipher to try first (default `"nip44"`); the other is attempted as a fallback. */
+  readonly preferredCipher?: EnvelopeCipher
 }
 
 const encryptEnvelopeJson = (
@@ -78,12 +80,15 @@ const encryptEnvelopeJson = (
   cipher === "nip04" ? nip04EncryptJson(signer, peerPubkey, payload) : encryptJson(signer, peerPubkey, payload)
 
 export const decryptEnvelopeJson = async (
-  { signer, peerPubkey, ciphertext }: DecryptEnvelopeParams,
+  { signer, peerPubkey, ciphertext, preferredCipher = "nip44" }: DecryptEnvelopeParams,
 ): Promise<{ value: unknown; cipher: EnvelopeCipher } | null> => {
-  const nip44 = await decryptJson(signer, peerPubkey, ciphertext)
-  if (nip44.success) return { value: nip44.value, cipher: "nip44" }
-  const nip04 = await nip04DecryptJson(signer, peerPubkey, ciphertext)
-  if (nip04.success) return { value: nip04.value, cipher: "nip04" }
+  const attempt = (cipher: EnvelopeCipher): Promise<Result<unknown, JsonCryptoError>> =>
+    cipher === "nip04" ? nip04DecryptJson(signer, peerPubkey, ciphertext) : decryptJson(signer, peerPubkey, ciphertext)
+  const fallbackCipher: EnvelopeCipher = preferredCipher === "nip44" ? "nip04" : "nip44"
+  const first = await attempt(preferredCipher)
+  if (first.success) return { value: first.value, cipher: preferredCipher }
+  const second = await attempt(fallbackCipher)
+  if (second.success) return { value: second.value, cipher: fallbackCipher }
   return null
 }
 

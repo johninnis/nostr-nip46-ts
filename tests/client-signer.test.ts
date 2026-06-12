@@ -57,6 +57,7 @@ interface Harness {
     response: { result?: string; error?: string },
     fromPubkey?: PublicKey,
   ) => void
+  readonly deliver: (event: NostrEvent) => void
 }
 
 const createHarness = (
@@ -111,7 +112,7 @@ const createHarness = (
     deliver(signed)
   }
 
-  return { signer, published, publishedRelays, injectBunkerResponse }
+  return { signer, published, publishedRelays, injectBunkerResponse, deliver }
 }
 
 Deno.test("signEvent - resolves with bunker-signed event when response matches request id", async () => {
@@ -401,4 +402,42 @@ Deno.test("subscription filter targets kind 24133 addressed to client", async ()
   assertEquals(publishedEvent.tags[0], ["p", BUNKER_PK])
 
   h.signer.disconnect()
+})
+
+Deno.test("a NIP-04 response teaches the client the bunker's cipher for subsequent requests", async () => {
+  const h = createHarness({ initialUserPubkey: USER_PK })
+
+  const unsigned: UnsignedEvent = { kind: 1, created_at: 100, tags: [], content: "one" }
+  const firstPromise = h.signer.signEvent(unsigned)
+  await flush()
+
+  const firstRequest = h.published[0]
+  assert(firstRequest !== undefined)
+  assert(firstRequest.content.startsWith("ENC:"), "first request defaults to NIP-44")
+
+  const parsed: unknown = JSON.parse(fakeTools.nip44Decrypt(new Uint8Array(32), firstRequest.content))
+  assert(isRequestIdBody(parsed))
+  const signedByBunker = makeSigned(unsigned, USER_PK)
+  const responseBody = { id: parsed.id, result: JSON.stringify(signedByBunker) }
+  const nip04Content = await fakeTools.nip04Encrypt(BUNKER_SK, CLIENT_PK, JSON.stringify(responseBody))
+  h.deliver(makeSigned({
+    kind: KIND_NOSTR_CONNECT,
+    created_at: now(),
+    tags: [["p", CLIENT_PK]],
+    content: nip04Content,
+  }, BUNKER_PK))
+
+  const result = await firstPromise
+  assertEquals(result.content, "one")
+
+  const secondPromise = h.signer.signEvent({ kind: 1, created_at: 101, tags: [], content: "two" })
+  const secondRejection = assertRejects(() => secondPromise, SigningError)
+  await flush()
+
+  const secondRequest = h.published[1]
+  assert(secondRequest !== undefined)
+  assert(secondRequest.content.startsWith("NIP04:"), "second request follows the learned NIP-04 cipher")
+
+  h.signer.disconnect()
+  await secondRejection
 })

@@ -22,6 +22,7 @@ import {
   tryParsePublicKey,
   verifyEventSignature as defaultVerifyEventSignature,
 } from "@innis/nostr-core"
+import type { EnvelopeCipher } from "./protocol.ts"
 import {
   CLOCK_SKEW_TOLERANCE_SECONDS,
   decryptEnvelopeJson,
@@ -112,6 +113,9 @@ export const createNip46ClientSigner = ({
   const envelopeSigner = createLocalSigner(clientSecretKey, tools)
   const pending = new Map<string, PendingRequest>()
   let userPubkey: PublicKey | null = initialUserPubkey
+  // Cipher the bunker last spoke; requests and first decrypt attempts follow it so a NIP-04 peer
+  // does not cost a failed NIP-44 attempt on every envelope. Mirrors the bunker's per-client cache.
+  let peerCipher: EnvelopeCipher = "nip44"
   let subscription: Nip46Subscription | null = null
 
   const handleResponse = async (event: NostrEvent): Promise<void> => {
@@ -120,8 +124,10 @@ export const createNip46ClientSigner = ({
       signer: envelopeSigner,
       peerPubkey: event.pubkey,
       ciphertext: event.content,
+      preferredCipher: peerCipher,
     })
     if (!decoded) return
+    peerCipher = decoded.cipher
     const response = parseResponse(decoded.value)
     if (!response) return
     const request = pending.get(response.id)
@@ -185,6 +191,7 @@ export const createNip46ClientSigner = ({
           relays: relayUrls,
           peerPubkey: remoteSignerPubkey,
           payload,
+          cipher: peerCipher,
           now,
         })
         if (!sent.success) {
