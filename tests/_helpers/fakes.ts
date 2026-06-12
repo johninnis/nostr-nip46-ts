@@ -1,6 +1,6 @@
 import type { LocalSignerTools, NostrEvent, PublicKey, RelayUrl } from "@innis/nostr-core"
 import { parseSig } from "@innis/nostr-core"
-import type { Nip46Transport } from "../src/transport.ts"
+import type { Nip46Transport } from "../../src/transport.ts"
 
 export const makeFakeTools = (getPublicKey: (secretKey: Uint8Array) => PublicKey): LocalSignerTools => ({
   getPublicKey,

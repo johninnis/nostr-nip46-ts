@@ -13,7 +13,7 @@ import type { Nip46Bunker, PendingSignRequest } from "../src/bunker.ts"
 import { createNip46Bunker } from "../src/bunker.ts"
 import { parseBunkerUrl } from "../src/bunker-url.ts"
 import type { Nip46Transport } from "../src/transport.ts"
-import { createCapturingTransport, flush, makeFakeTools } from "./helpers.ts"
+import { createCapturingTransport, flush, makeFakeTools } from "./_helpers/fakes.ts"
 
 const BUNKER_SK = new Uint8Array(32).fill(2)
 const BUNKER_PK = parsePublicKey("b".repeat(64))

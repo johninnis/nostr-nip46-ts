@@ -11,7 +11,7 @@ import {
   SigningError,
 } from "@innis/nostr-core"
 import { createNip46ClientSigner } from "../src/client-signer.ts"
-import { createCapturingTransport, flush, makeFakeTools } from "./helpers.ts"
+import { createCapturingTransport, flush, makeFakeTools } from "./_helpers/fakes.ts"
 
 const CLIENT_SK = new Uint8Array(32).fill(1)
 const BUNKER_SK = new Uint8Array(32).fill(2)
