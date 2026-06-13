@@ -3,7 +3,7 @@ import {
   constantTimeEqual,
   isRecord,
   isValidPublicKey,
-  isValidTag,
+  isValidTagsArray,
   KIND_NOSTR_CONNECT,
   now as defaultNow,
   reportUnhandledError,
@@ -95,7 +95,7 @@ const parseUnsignedEventInput = (value: unknown): UnsignedEventInput | null => {
   if (value.created_at !== undefined && typeof value.created_at !== "number") return null
   if (value.content !== undefined && typeof value.content !== "string") return null
   const tags = value.tags
-  if (tags !== undefined && (!Array.isArray(tags) || !tags.every(isValidTag))) return null
+  if (tags !== undefined && !isValidTagsArray(tags)) return null
   return { kind: value.kind, created_at: value.created_at, content: value.content, tags }
 }
 

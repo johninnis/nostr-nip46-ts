@@ -3,6 +3,7 @@ import {
   decryptJson,
   encryptJson,
   isRecord,
+  isStringArray,
   KIND_NOSTR_CONNECT,
   nip04DecryptJson,
   nip04EncryptJson,
@@ -27,7 +28,7 @@ export const parseRequest = (value: unknown): Nip46Request | null => {
   if (!isRecord(value) || typeof value.id !== "string" || typeof value.method !== "string") return null
   const rawParams = value.params
   if (rawParams === undefined) return { id: value.id, method: value.method, params: [] }
-  if (!Array.isArray(rawParams) || !rawParams.every((p): p is string => typeof p === "string")) return null
+  if (!isStringArray(rawParams)) return null
   return { id: value.id, method: value.method, params: rawParams }
 }
 
