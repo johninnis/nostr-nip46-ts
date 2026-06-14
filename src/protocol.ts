@@ -3,7 +3,6 @@ import {
   decryptJson,
   encryptJson,
   isRecord,
-  isStringArray,
   KIND_NOSTR_CONNECT,
   nip04DecryptJson,
   nip04EncryptJson,
@@ -28,8 +27,11 @@ export const parseRequest = (value: unknown): Nip46Request | null => {
   if (!isRecord(value) || typeof value.id !== "string" || typeof value.method !== "string") return null
   const rawParams = value.params
   if (rawParams === undefined) return { id: value.id, method: value.method, params: [] }
-  if (!isStringArray(rawParams)) return null
-  return { id: value.id, method: value.method, params: rawParams }
+  if (!Array.isArray(rawParams)) return null
+  // Some clients send `sign_event`'s event as a raw object rather than the spec's JSON string;
+  // normalise any non-string param back to its JSON form so the one downstream path handles both.
+  const params = rawParams.map((param): string => typeof param === "string" ? param : JSON.stringify(param))
+  return { id: value.id, method: value.method, params }
 }
 
 export const parseResponse = (value: unknown): Nip46Response | null => {

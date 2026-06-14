@@ -48,7 +48,7 @@ interface Harness {
   readonly published: ReadonlyArray<NostrEvent>
   readonly send: (
     clientPubkey: PublicKey,
-    body: { id: string; method: string; params?: ReadonlyArray<string> },
+    body: { id: string; method: string; params?: ReadonlyArray<unknown> },
     cipher?: "nip04" | "nip44",
   ) => Promise<void>
   readonly deliver: (event: NostrEvent) => void
@@ -69,7 +69,7 @@ const createHarness = (secret: string, now?: () => number): Harness => {
 
   const send = async (
     clientPubkey: PublicKey,
-    body: { id: string; method: string; params?: ReadonlyArray<string> },
+    body: { id: string; method: string; params?: ReadonlyArray<unknown> },
     cipher: "nip04" | "nip44" = "nip44",
   ): Promise<void> => {
     const fullBody = { id: body.id, method: body.method, params: body.params ?? [] }
@@ -203,6 +203,18 @@ Deno.test("bunker - connect with correct secret authenticates client for subsequ
     await h.send(CLIENT_PK, { id: "7", method: "connect", params: [USER_PK, "supersecret"] })
     assertEquals(h.lastResponse()?.result, "ack")
     await h.send(CLIENT_PK, { id: "8", method: "get_public_key" })
+    assertEquals(h.lastResponse()?.result, USER_PK)
+  } finally {
+    h.stop()
+  }
+})
+
+Deno.test("bunker - connect with an empty signer pubkey and correct secret authenticates", async () => {
+  const h = createHarness("supersecret")
+  try {
+    await h.send(CLIENT_PK, { id: "es1", method: "connect", params: ["", "supersecret"] })
+    assertEquals(h.lastResponse()?.result, "ack")
+    await h.send(CLIENT_PK, { id: "es2", method: "get_public_key" })
     assertEquals(h.lastResponse()?.result, USER_PK)
   } finally {
     h.stop()
@@ -409,6 +421,20 @@ Deno.test("bunker - getPending returns the most recently received request first"
       params: [JSON.stringify({ kind: 1, content: "second" })],
     })
     assertEquals(h.pending().map((p) => p.id), ["p2", "p1"])
+  } finally {
+    h.stop()
+  }
+})
+
+Deno.test("bunker - queues a sign_event whose event arrives as a raw object, not a JSON string", async () => {
+  const h = createHarness("supersecret")
+  try {
+    await h.send(CLIENT_PK, { id: "obj1", method: "connect", params: [USER_PK, "supersecret"] })
+    await h.send(CLIENT_PK, { id: "obj2", method: "sign_event", params: [{ kind: 1, content: "from object client" }] })
+    const pending = h.pending()
+    assertEquals(pending.length, 1)
+    assertEquals(pending[0]?.eventToSign.kind, 1)
+    assertEquals(pending[0]?.eventToSign.content, "from object client")
   } finally {
     h.stop()
   }

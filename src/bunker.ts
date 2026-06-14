@@ -168,7 +168,10 @@ export const createNip46Bunker = ({ transport, signer, now = defaultNow }: Bunke
 
   const dispatch = async (clientPubkey: PublicKey, request: Nip46Request): Promise<void> => {
     if (request.method === "connect") {
-      if (request.params[0] !== userPubkey) {
+      // Some clients leave the remote-signer pubkey empty and rely on the secret; the request is
+      // already bound to this signer by its `#p` tag, so only a different, non-empty pubkey is wrong.
+      const requestedSigner = request.params[0] ?? ""
+      if (requestedSigner !== "" && requestedSigner !== userPubkey) {
         return sendResponse(clientPubkey, { id: request.id, error: "invalid signer" })
       }
       const providedSecret = request.params[1] ?? ""
