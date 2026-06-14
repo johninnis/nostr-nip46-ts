@@ -440,6 +440,18 @@ Deno.test("bunker - queues a sign_event whose event arrives as a raw object, not
   }
 })
 
+Deno.test("bunker - answers switch_relays with an ack so handshake-gating clients proceed", async () => {
+  const h = createHarness("supersecret")
+  try {
+    await h.send(CLIENT_PK, { id: "sr1", method: "connect", params: [USER_PK, "supersecret"] })
+    await h.send(CLIENT_PK, { id: "sr2", method: "switch_relays", params: [] })
+    assertEquals(h.lastResponse()?.result, "ack")
+    assertEquals(h.lastResponse()?.error, undefined)
+  } finally {
+    h.stop()
+  }
+})
+
 Deno.test("bunker - rejects unsupported methods once authenticated", async () => {
   const h = createHarness("supersecret")
   try {

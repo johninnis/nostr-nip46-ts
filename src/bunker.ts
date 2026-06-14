@@ -193,6 +193,12 @@ export const createNip46Bunker = ({ transport, signer, now = defaultNow }: Bunke
         userPubkey === null ? { id: request.id, error: "not connected" } : { id: request.id, result: userPubkey },
       )
     }
+    if (request.method === "switch_relays") {
+      // The bunker's relay set is fixed at `start`; clients that gate their handshake on this method
+      // (e.g. Flotilla) only need a non-error reply to proceed, and the request already reached us on
+      // a shared relay, so acknowledge without changing what we listen on.
+      return sendResponse(clientPubkey, { id: request.id, result: "ack" })
+    }
     const cryptoMethod = signerCryptoMethodFor(request.method)
     if (cryptoMethod) {
       const [targetPubkey, payload] = request.params
