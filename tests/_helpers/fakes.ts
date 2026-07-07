@@ -1,6 +1,6 @@
 import type { LocalSignerTools, NostrEvent, PublicKey, RelayUrl } from "@innis/nostr-core"
 import { parseSig } from "@innis/nostr-core"
-import type { Nip46Transport } from "../../src/transport.ts"
+import type { Nip46SubscriptionStatus, Nip46Transport } from "../../src/transport.ts"
 
 export const makeFakeTools = (getPublicKey: (secretKey: Uint8Array) => PublicKey): LocalSignerTools => ({
   getPublicKey,
@@ -23,20 +23,27 @@ export interface CapturingTransport {
   readonly published: ReadonlyArray<NostrEvent>
   readonly publishedRelays: ReadonlyArray<RelayUrl>
   readonly deliver: (event: NostrEvent) => void
+  readonly emitStatus: (status: Nip46SubscriptionStatus) => void
 }
 
 export const createCapturingTransport = (): CapturingTransport => {
   const published: Array<NostrEvent> = []
   const publishedRelays: Array<RelayUrl> = []
   const handlers: Array<(event: NostrEvent) => void> = []
+  const statusHandlers: Array<(status: Nip46SubscriptionStatus) => void> = []
 
   const transport: Nip46Transport = {
-    subscribe: ({ onEvent }) => {
+    subscribe: ({ onEvent, onStatus }) => {
       handlers.push(onEvent)
+      if (onStatus) statusHandlers.push(onStatus)
       return {
         abort: () => {
           const i = handlers.indexOf(onEvent)
           if (i >= 0) handlers.splice(i, 1)
+          if (onStatus) {
+            const s = statusHandlers.indexOf(onStatus)
+            if (s >= 0) statusHandlers.splice(s, 1)
+          }
         },
       }
     },
@@ -53,6 +60,9 @@ export const createCapturingTransport = (): CapturingTransport => {
     publishedRelays,
     deliver: (event) => {
       for (const handler of handlers) handler(event)
+    },
+    emitStatus: (status) => {
+      for (const handler of statusHandlers) handler(status)
     },
   }
 }

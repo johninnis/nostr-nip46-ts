@@ -20,7 +20,7 @@ import {
   signerCryptoMethodFor,
 } from "./protocol.ts"
 import { formatBunkerUrl } from "./bunker-url.ts"
-import type { Nip46Subscription, Nip46Transport } from "./transport.ts"
+import type { Nip46Subscription, Nip46SubscriptionStatus, Nip46Transport } from "./transport.ts"
 
 /** A `sign_event` request body as received from a client — the fields the bunker will sign, with optional parts defaulted at approval time. */
 export interface UnsignedEventInput {
@@ -70,7 +70,9 @@ export interface Nip46Bunker {
   readonly approve: (id: string) => Promise<void>
   /** Declines the queued request with the given id, replying `user rejected`; a no-op for an unknown id. */
   readonly reject: (id: string) => Promise<void>
-  /** Registers a listener fired whenever the queue changes; returns an unsubscribe function. */
+  /** The live subscription's {@link Nip46SubscriptionStatus} — `closed` before {@link Nip46Bunker.start} and after {@link Nip46Bunker.stop}. */
+  readonly getSubscriptionStatus: () => Nip46SubscriptionStatus
+  /** Registers a listener fired whenever the queue or the subscription status changes; returns an unsubscribe function. */
   readonly onUpdate: (listener: () => void) => () => void
 }
 
@@ -116,6 +118,7 @@ export const createNip46Bunker = ({ transport, signer, now = defaultNow }: Bunke
   let relays: ReadonlyArray<RelayUrl> = []
   let secret: string | null = null
   let subscription: Nip46Subscription | null = null
+  let subscriptionStatus: Nip46SubscriptionStatus = "closed"
 
   const notify = (): void => {
     for (const listener of listeners) {
@@ -245,6 +248,7 @@ export const createNip46Bunker = ({ transport, signer, now = defaultNow }: Bunke
     seenEventIds.clear()
     authenticatedClients.clear()
     clientEnvelopeCipher.clear()
+    subscriptionStatus = "closed"
     notify()
   }
 
@@ -260,8 +264,14 @@ export const createNip46Bunker = ({ transport, signer, now = defaultNow }: Bunke
       onEvent: (event) => {
         handleEvent(event).catch(reportUnhandledError)
       },
+      onStatus: (status) => {
+        subscriptionStatus = status
+        notify()
+      },
     })
   }
+
+  const getSubscriptionStatus = (): Nip46SubscriptionStatus => subscriptionStatus
 
   const getBunkerUrl = (): string | null => {
     if (!userPubkey || relays.length === 0 || !secret) return null
@@ -306,5 +316,5 @@ export const createNip46Bunker = ({ transport, signer, now = defaultNow }: Bunke
     }
   }
 
-  return Object.freeze({ start, stop, getBunkerUrl, getPending, approve, reject, onUpdate })
+  return Object.freeze({ start, stop, getBunkerUrl, getPending, approve, reject, getSubscriptionStatus, onUpdate })
 }

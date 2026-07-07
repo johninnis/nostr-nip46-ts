@@ -1,6 +1,14 @@
 import type { NostrEvent, NostrFilter, RelayUrl } from "@innis/nostr-core"
 
-/** Inputs to a single NIP-46 subscription: a filter, the relay set to open it on, and the per-event callback. */
+/**
+ * Lifecycle state of a NIP-46 subscription:
+ * - `pending` — opening: awaiting a socket, an AUTH handshake, or the stored backlog to drain.
+ * - `active` — live: the relay has signalled end-of-stored-events and the subscription is receiving.
+ * - `closed` — terminally torn down (relay `CLOSED`, pool teardown) or never established.
+ */
+export type Nip46SubscriptionStatus = "pending" | "active" | "closed"
+
+/** Inputs to a single NIP-46 subscription: a filter, the relay set to open it on, the per-event callback, and an optional lifecycle-status callback. */
 export interface Nip46SubscribeOptions {
   /** The Nostr filter selecting kind 24133 envelopes addressed to this peer. */
   readonly filter: NostrFilter
@@ -8,6 +16,8 @@ export interface Nip46SubscribeOptions {
   readonly relays: ReadonlyArray<RelayUrl>
   /** Invoked once per received event. De-duplication across relays is the caller's responsibility. */
   readonly onEvent: (event: NostrEvent) => void
+  /** Invoked on every {@link Nip46SubscriptionStatus} transition, beginning with the subscription's initial state. */
+  readonly onStatus?: (status: Nip46SubscriptionStatus) => void
 }
 
 /** Handle to a live subscription returned by {@link Nip46Transport.subscribe}. */
