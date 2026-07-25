@@ -141,13 +141,10 @@ export const createNip46Bunker = ({ transport, signer, now = defaultNow }: Bunke
     clientPubkey: PublicKey,
     payload: Nip46Response,
   ): Promise<void> => {
-    if (relays.length === 0) return
     const cipher = clientEnvelopeCipher.get(clientPubkey) ?? "nip44"
     const sent = await sendEnvelope({ signer, transport, relays, peerPubkey: clientPubkey, payload, cipher, now })
     if (!sent.success) {
-      reportUnhandledError(
-        new Error(`NIP-46 response encryption failed (${cipher}): ${sent.error.tag} — ${sent.error.message}`),
-      )
+      reportUnhandledError(new Error(`NIP-46 response not sent (${cipher}): ${sent.error.message}`))
     }
   }
 

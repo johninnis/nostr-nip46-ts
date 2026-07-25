@@ -342,7 +342,7 @@ Deno.test("bunker - rejects nip04_encrypt from unauthenticated client", async ()
 Deno.test("bunker - start with an empty secret is a no-op and emits no URL", () => {
   const transport: Nip46Transport = {
     subscribe: () => ({ abort: () => {} }),
-    publish: () => Promise.resolve(),
+    publish: () => Promise.resolve({ ok: true }),
   }
   const bunker = createNip46Bunker({ transport, signer: createLocalSigner(BUNKER_SK, fakeTools) })
 
@@ -354,7 +354,7 @@ Deno.test("bunker - start with an empty secret is a no-op and emits no URL", () 
 Deno.test("bunker - URL-encodes the secret in getBunkerUrl", () => {
   const transport: Nip46Transport = {
     subscribe: () => ({ abort: () => {} }),
-    publish: () => Promise.resolve(),
+    publish: () => Promise.resolve({ ok: true }),
   }
   const bunkerSigner = createLocalSigner(BUNKER_SK, fakeTools)
   const bunker = createNip46Bunker({ transport, signer: bunkerSigner })

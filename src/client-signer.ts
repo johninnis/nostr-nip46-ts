@@ -57,7 +57,11 @@ export interface Nip46ClientSignerDeps {
   readonly secret: string | null
   /** A previously known user pubkey (e.g. a restored session); when set, {@link Nip46ClientSigner.connect} skips the handshake. */
   readonly initialUserPubkey?: PublicKey | null
-  /** Per-request timeout in milliseconds. Defaults to 300000 (5 minutes). */
+  /**
+   * Per-request timeout in milliseconds. Defaults to 60000 (1 minute) — long enough for a human
+   * to approve a prompt in their bunker, short enough that a dropped response surfaces as a
+   * failure while the user is still looking at the request.
+   */
   readonly timeoutMs?: number
   /** Clock returning Unix seconds; injectable for tests. Defaults to the core `now`. */
   readonly now?: () => number
@@ -102,7 +106,7 @@ export const createNip46ClientSigner = ({
   relayUrls,
   secret,
   initialUserPubkey = null,
-  timeoutMs = 300_000,
+  timeoutMs = 60_000,
   now = defaultNow,
   generateRequestId = () => globalThis.crypto.randomUUID(),
   verifyEventSignature = defaultVerifyEventSignature,
@@ -195,7 +199,7 @@ export const createNip46ClientSigner = ({
           now,
         })
         if (!sent.success) {
-          failPending(new SigningError(`failed to encrypt NIP-46 request: ${sent.error.message}`, sent.error))
+          failPending(new Nip46RequestError(sent.error.message, sent.error.tag === "delivery-failed"))
         }
       })().catch((err: unknown) => {
         failPending(err instanceof Error ? err : new SigningError(String(err)))

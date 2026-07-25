@@ -27,6 +27,16 @@ export interface Nip46Subscription {
 }
 
 /**
+ * Outcome of publishing one envelope to one relay. Structurally satisfied by a relay pool's
+ * own publish response (for example `@innis/nostr-relay-pool`'s `PublishResponse`), so a
+ * transport can forward it unchanged.
+ */
+export interface Nip46PublishResult {
+  /** `true` when that relay accepted the event. */
+  readonly ok: boolean
+}
+
+/**
  * The sole Nostr-on-the-wire surface this library touches — an injected port so the library can
  * be ported to any environment and tested without a real relay pool. Typically wired straight to
  * a relay pool's `subscribe` / `publish` (for example `@innis/nostr-relay-pool`).
@@ -35,9 +45,9 @@ export interface Nip46Transport {
   /** Opens a multi-relay subscription and returns a handle to abort it. */
   readonly subscribe: (options: Nip46SubscribeOptions) => Nip46Subscription
   /**
-   * Publishes one event to a single relay. The return value is intentionally `unknown`: the
-   * library fires-and-forgets to every relay and never reads it, while real implementations may
-   * return a richer publish result.
+   * Publishes one event to a single relay and resolves with whether that relay accepted it.
+   * A request whose envelope no relay accepted can never be answered, so the library fails it
+   * immediately rather than leaving the caller waiting for the request timeout.
    */
-  readonly publish: (relayUrl: RelayUrl, event: NostrEvent) => Promise<unknown>
+  readonly publish: (relayUrl: RelayUrl, event: NostrEvent) => Promise<Nip46PublishResult>
 }

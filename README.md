@@ -20,7 +20,7 @@ interface Nip46ClientSignerDeps {
     readonly relayUrls: ReadonlyArray<RelayUrl>      // every relay the bunker:// URL advertised
     readonly secret: string | null                   // initial pairing secret from bunker:// URL
     readonly initialUserPubkey?: PublicKey | null
-    readonly timeoutMs?: number                      // default 5 min
+    readonly timeoutMs?: number                      // default 60 s
     readonly now?: () => number
     readonly generateRequestId?: () => string
     readonly verifyEventSignature?: (event: NostrEvent) => Promise<boolean> // default: @innis/nostr-core
@@ -82,11 +82,11 @@ Approval signs the requested event using the supplied `Signer` (in practice the 
 ```ts
 interface Nip46Transport {
     readonly subscribe: (params: { filter, relays, onEvent }) => { abort: () => void }
-    readonly publish: (relayUrl, event) => Promise<unknown>
+    readonly publish: (relayUrl, event) => Promise<{ ok: boolean }>
 }
 ```
 
-The transport is the *only* Nostr-on-the-wire surface this lib touches. It's an injected port so the lib can be ported to other environments and tested without a real relay pool. `publish` returns `Promise<unknown>` by design: the library never reads the resolved value (it fires-and-forgets to every relay), but real implementations such as `@innis/nostr-relay-pool`'s `pool.publish` return a `PublishResponse`. Typing the port as `Promise<void>` would force every adapter to discard that value at the boundary; `unknown` lets implementations return whatever they have while the lib stays indifferent to it.
+The transport is the *only* Nostr-on-the-wire surface this lib touches. It's an injected port so the lib can be ported to other environments and tested without a real relay pool. `publish` resolves with whether that relay accepted the envelope; the shape is a structural subset of `@innis/nostr-relay-pool`'s `PublishResponse`, so a host can forward the pool's result unchanged. An envelope no relay accepted can never be answered, so `sendEnvelope` returns a `Nip46SendError` with tag `delivery-failed` and the client rejects the pending request straight away rather than leaving it to expire at `timeoutMs`. One accepting relay is enough — a partial success is a send.
 
 A typical host wires this port directly to a relay pool's `subscribe` / `publish` (for example `@innis/nostr-relay-pool`). Bunker comms are transport-level RPC, not application content — keep them off whatever content cache and publish pipeline your app uses for ordinary events.
 

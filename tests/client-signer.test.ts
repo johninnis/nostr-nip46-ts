@@ -58,6 +58,7 @@ interface Harness {
     fromPubkey?: PublicKey,
   ) => void
   readonly deliver: (event: NostrEvent) => void
+  readonly rejectPublishes: () => void
 }
 
 const createHarness = (
@@ -71,7 +72,7 @@ const createHarness = (
     onAuthChallenge?: (url: string) => void
   } = {},
 ): Harness => {
-  const { transport, published, publishedRelays, deliver } = createCapturingTransport()
+  const { transport, published, publishedRelays, deliver, rejectPublishes } = createCapturingTransport()
 
   const signer = createNip46ClientSigner({
     tools: fakeTools,
@@ -112,7 +113,7 @@ const createHarness = (
     deliver(signed)
   }
 
-  return { signer, published, publishedRelays, injectBunkerResponse, deliver }
+  return { signer, published, publishedRelays, injectBunkerResponse, deliver, rejectPublishes }
 }
 
 Deno.test("signEvent - resolves with bunker-signed event when response matches request id", async () => {
@@ -335,6 +336,33 @@ Deno.test("nip44Encrypt returns a disconnected failure when the request times ou
   const result = await h.signer.nip44Encrypt(USER_PK, "secret")
   if (result.success) throw new Error("expected failure")
   assertEquals(result.error.tag, "disconnected")
+})
+
+Deno.test("nip44Encrypt fails immediately when no relay accepts the request envelope", async () => {
+  const h = createHarness({ initialUserPubkey: USER_PK })
+  h.rejectPublishes()
+
+  const result = await h.signer.nip44Encrypt(USER_PK, "secret")
+  if (result.success) throw new Error("expected failure")
+  assertEquals(result.error.tag, "disconnected")
+})
+
+Deno.test("nip44Encrypt fails immediately when there is no relay to publish to", async () => {
+  const h = createHarness({ initialUserPubkey: USER_PK, relayUrls: [] })
+
+  const result = await h.signer.nip44Encrypt(USER_PK, "secret")
+  if (result.success) throw new Error("expected failure")
+  assertEquals(result.error.tag, "disconnected")
+})
+
+Deno.test("signEvent rejects immediately when no relay accepts the request envelope", async () => {
+  const h = createHarness({ initialUserPubkey: USER_PK })
+  h.rejectPublishes()
+
+  await assertRejects(
+    () => h.signer.signEvent({ kind: 1, created_at: now(), tags: [], content: "hello" }),
+    SigningError,
+  )
 })
 
 Deno.test("nip44Encrypt maps a bunker error response to encrypt-failed", async () => {

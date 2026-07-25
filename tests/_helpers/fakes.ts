@@ -24,11 +24,14 @@ export interface CapturingTransport {
   readonly publishedRelays: ReadonlyArray<RelayUrl>
   readonly deliver: (event: NostrEvent) => void
   readonly emitStatus: (status: Nip46SubscriptionStatus) => void
+  /** Makes every subsequent publish report the relay rejecting the event. */
+  readonly rejectPublishes: () => void
 }
 
 export const createCapturingTransport = (): CapturingTransport => {
   const published: Array<NostrEvent> = []
   const publishedRelays: Array<RelayUrl> = []
+  let publishOk = true
   const handlers: Array<(event: NostrEvent) => void> = []
   const statusHandlers: Array<(status: Nip46SubscriptionStatus) => void> = []
 
@@ -50,7 +53,7 @@ export const createCapturingTransport = (): CapturingTransport => {
     publish: (url, event) => {
       published.push(event)
       publishedRelays.push(url)
-      return Promise.resolve()
+      return Promise.resolve({ ok: publishOk })
     },
   }
 
@@ -63,6 +66,9 @@ export const createCapturingTransport = (): CapturingTransport => {
     },
     emitStatus: (status) => {
       for (const handler of statusHandlers) handler(status)
+    },
+    rejectPublishes: () => {
+      publishOk = false
     },
   }
 }

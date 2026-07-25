@@ -2,14 +2,29 @@ import type { JsonCryptoError, PublicKey, RelayUrl, Result, Signer, UnsignedEven
 import {
   decryptJson,
   encryptJson,
+  failure,
   isRecord,
   KIND_NOSTR_CONNECT,
   nip04DecryptJson,
   nip04EncryptJson,
   ok,
-  reportUnhandledError,
+  TaggedError,
 } from "@innis/nostr-core"
 import type { Nip46Transport } from "./transport.ts"
+
+/** Discriminator for `Nip46SendError.tag` — the envelope could not be encrypted, or no relay accepted it. */
+export type Nip46SendErrorTag = "encrypt-failed" | "delivery-failed"
+
+/**
+ * Returned by `sendEnvelope` when a NIP-46 envelope never reached the peer. `cause` carries the
+ * underlying `JsonCryptoError` for `encrypt-failed`; `delivery-failed` has no upstream error —
+ * it means every targeted relay rejected the publish, or there were no relays to try.
+ */
+export class Nip46SendError extends TaggedError<Nip46SendErrorTag, JsonCryptoError> {
+  constructor(tag: Nip46SendErrorTag, message: string, cause?: JsonCryptoError) {
+    super(tag, message, cause)
+  }
+}
 
 export interface Nip46Request {
   readonly id: string
@@ -114,10 +129,24 @@ interface SendEnvelopeParams {
 
 export const sendEnvelope = async (
   { signer, transport, relays, peerPubkey, payload, cipher, now }: SendEnvelopeParams,
-): Promise<Result<void, JsonCryptoError>> => {
+): Promise<Result<void, Nip46SendError>> => {
   const ciphertext = await encryptEnvelopeJson({ signer, peerPubkey, payload, cipher })
-  if (!ciphertext.success) return ciphertext
+  if (!ciphertext.success) {
+    return failure(
+      new Nip46SendError(
+        "encrypt-failed",
+        `failed to encrypt NIP-46 envelope (${ciphertext.error.tag}): ${ciphertext.error.message}`,
+        ciphertext.error,
+      ),
+    )
+  }
+  if (relays.length === 0) {
+    return failure(new Nip46SendError("delivery-failed", "no relay to publish the NIP-46 envelope to"))
+  }
   const signed = await signer.signEvent(buildEnvelopeEvent(peerPubkey, ciphertext.value, now()))
-  for (const relay of relays) transport.publish(relay, signed).catch(reportUnhandledError)
-  return ok(undefined)
+  const outcomes = await Promise.allSettled(relays.map((relay) => transport.publish(relay, signed)))
+  if (outcomes.some((outcome) => outcome.status === "fulfilled" && outcome.value.ok)) return ok(undefined)
+  return failure(
+    new Nip46SendError("delivery-failed", `no relay accepted the NIP-46 envelope (tried ${relays.length})`),
+  )
 }
