@@ -7,6 +7,12 @@ NIP-46 ("Nostr Connect" / "bunker"). Two roles, both implemented:
 - **Client** — the app holds no secret key; it asks a remote signer to sign events over a Nostr relay. Implements `Signer` from `@innis/nostr-core` so application code can't tell whether it's talking to a NIP-07 extension or a remote bunker.
 - **Bunker** — the *signer* role: a process that holds a secret key and answers `sign_event` / `nip44_*` / `nip04_*` requests. Used by the in-app bunker mode where the user's logged-in browser session can serve as a remote signer for another device. NIP-04 support is for legacy clients only — new code should use NIP-44.
 
+## Install
+
+```bash
+deno add jsr:@innis/nostr-nip46
+```
+
 ## Public surface
 
 ### `createNip46ClientSigner(deps)` — the client `Signer`
