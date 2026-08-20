@@ -4,6 +4,10 @@
   "publish": {
     "exclude": ["tests/", "deno.lock", ".github/"]
   },
+  "minimumDependencyAge": {
+    "age": "PT24H",
+    "exclude": ["jsr:@innis/*"]
+  },
   "license": "MIT",
   "description": "TypeScript NIP-46 (Nostr Connect / bunker) client and signer for Nostr — the client implements the canonical Signer interface from @innis/nostr-core so app code can't tell a remote bunker from a local key.",
   "exports": "./mod.ts",
