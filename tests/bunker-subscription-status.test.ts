@@ -1,16 +1,17 @@
 import { assert, assertEquals } from "@std/assert"
-import { createLocalSigner, parsePublicKey, parseRelayUrl } from "@innis/nostr-core"
-import { createNip46Bunker } from "../src/bunker.ts"
+import { createLocalSigner } from "@innis/nostr-core"
+import { publicKeyFixture, relayUrlFixture } from "@innis/nostr-core/testing"
+import { createNip46Bunker, type Nip46Bunker } from "../src/bunker.ts"
 import { createCapturingTransport, makeFakeTools } from "./_helpers/fakes.ts"
 
 const BUNKER_SK = new Uint8Array(32).fill(2)
-const BUNKER_PK = parsePublicKey("b".repeat(64))
-const USER_PK = parsePublicKey("f".repeat(64))
-const RELAY = parseRelayUrl("ws://127.0.0.1:0")
+const BUNKER_PK = publicKeyFixture("b".repeat(64))
+const USER_PK = publicKeyFixture("f".repeat(64))
+const RELAY = relayUrlFixture("wss://relay.example")
 
 const fakeTools = makeFakeTools(() => BUNKER_PK)
-const makeBunker = (transport: ReturnType<typeof createCapturingTransport>["transport"]) =>
-  createNip46Bunker({ transport, signer: createLocalSigner(BUNKER_SK, fakeTools) })
+const makeBunker = (transport: ReturnType<typeof createCapturingTransport>["transport"]): Nip46Bunker =>
+  createNip46Bunker({ transport, signer: createLocalSigner(BUNKER_SK, fakeTools), isAuthorised: () => false })
 
 Deno.test("subscription status is closed before start", () => {
   const { transport } = createCapturingTransport()

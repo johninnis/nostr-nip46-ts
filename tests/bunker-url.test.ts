@@ -1,5 +1,5 @@
 import { assertEquals } from "@std/assert"
-import { parsePublicKey, parseRelayUrl } from "@innis/nostr-core"
+import { publicKeyFixture, relayUrlFixture } from "@innis/nostr-core/testing"
 import { formatBunkerUrl, parseBunkerUrl } from "../src/bunker-url.ts"
 
 const PK = "a".repeat(64)
@@ -7,13 +7,13 @@ const PK = "a".repeat(64)
 Deno.test("parseBunkerUrl - valid URL with single relay and secret", () => {
   const result = parseBunkerUrl(`bunker://${PK}?relay=wss%3A%2F%2Frelay.example&secret=abc123`)
   assertEquals(result?.remoteSignerPubkey, PK)
-  assertEquals(result?.relays, [parseRelayUrl("wss://relay.example")])
+  assertEquals(result?.relays, [relayUrlFixture("wss://relay.example")])
   assertEquals(result?.secret, "abc123")
 })
 
 Deno.test("parseBunkerUrl - multiple relay params preserved in order", () => {
   const result = parseBunkerUrl(`bunker://${PK}?relay=wss%3A%2F%2Fa.example&relay=wss%3A%2F%2Fb.example&secret=x`)
-  assertEquals(result?.relays, [parseRelayUrl("wss://a.example"), parseRelayUrl("wss://b.example")])
+  assertEquals(result?.relays, [relayUrlFixture("wss://a.example"), relayUrlFixture("wss://b.example")])
 })
 
 Deno.test("parseBunkerUrl - returns null without bunker prefix", () => {
@@ -33,10 +33,9 @@ Deno.test("parseBunkerUrl - secret is null when omitted", () => {
   assertEquals(result?.secret, null)
 })
 
-Deno.test("parseBunkerUrl - lowercases pubkey for stable comparison", () => {
+Deno.test("parseBunkerUrl - refuses a pubkey that is not NIP-01 lowercase hex", () => {
   const upper = "ABCDEF" + "0".repeat(58)
-  const result = parseBunkerUrl(`bunker://${upper}?relay=wss%3A%2F%2Fx`)
-  assertEquals(result?.remoteSignerPubkey, upper.toLowerCase())
+  assertEquals(parseBunkerUrl(`bunker://${upper}?relay=wss%3A%2F%2Fx`), null)
 })
 
 Deno.test("parseBunkerUrl - trims surrounding whitespace", () => {
@@ -51,7 +50,7 @@ Deno.test("parseBunkerUrl - rejects non-websocket relay schemes", () => {
 
 Deno.test("parseBunkerUrl - filters invalid relay URLs but keeps valid ones", () => {
   const result = parseBunkerUrl(`bunker://${PK}?relay=javascript%3Aalert(1)&relay=wss%3A%2F%2Fok.example`)
-  assertEquals(result?.relays, [parseRelayUrl("wss://ok.example")])
+  assertEquals(result?.relays, [relayUrlFixture("wss://ok.example")])
 })
 
 Deno.test("parseBunkerUrl - returns null when all relays are invalid", () => {
@@ -61,17 +60,26 @@ Deno.test("parseBunkerUrl - returns null when all relays are invalid", () => {
 
 Deno.test("formatBunkerUrl - round-trips through parseBunkerUrl with multiple relays and a secret", () => {
   const original = {
-    remoteSignerPubkey: parsePublicKey(PK),
-    relays: [parseRelayUrl("wss://a.example"), parseRelayUrl("wss://b.example")],
+    remoteSignerPubkey: publicKeyFixture(PK),
+    relays: [relayUrlFixture("wss://a.example"), relayUrlFixture("wss://b.example")],
     secret: "secret with spaces & symbols=#",
   }
   assertEquals(parseBunkerUrl(formatBunkerUrl(original)), original)
 })
 
+Deno.test("formatBunkerUrl - percent-encodes the query, never form-encodes it", () => {
+  const url = formatBunkerUrl({
+    remoteSignerPubkey: publicKeyFixture(PK),
+    relays: [relayUrlFixture("wss://a.example")],
+    secret: "secret with spaces & symbols=#",
+  })
+  assertEquals(url.includes("secret=secret%20with%20spaces%20%26%20symbols%3D%23"), true)
+})
+
 Deno.test("formatBunkerUrl - omits the secret param when secret is null", () => {
   const url = formatBunkerUrl({
-    remoteSignerPubkey: parsePublicKey(PK),
-    relays: [parseRelayUrl("wss://a.example")],
+    remoteSignerPubkey: publicKeyFixture(PK),
+    relays: [relayUrlFixture("wss://a.example")],
     secret: null,
   })
   assertEquals(url.includes("secret="), false)

@@ -1,121 +1,37 @@
 import { assert, assertEquals, assertRejects } from "@std/assert"
-import type { NostrEvent, PublicKey, RelayUrl, UnsignedEvent } from "@innis/nostr-core"
-import {
-  KIND_NOSTR_CONNECT,
-  now,
-  parseEventId,
-  parsePublicKey,
-  parseRelayUrl,
-  parseSig,
-  PubkeyMismatchError,
-  SigningError,
-} from "@innis/nostr-core"
+import type { UnsignedEvent } from "@innis/nostr-core"
+import { failure, InvalidArgumentError, KIND_NOSTR_CONNECT, now, ok } from "@innis/nostr-core"
+import { publicKeyFixture, relayUrlFixture } from "@innis/nostr-core/testing"
 import { createNip46ClientSigner } from "../src/client-signer.ts"
-import { createCapturingTransport, flush, makeFakeTools } from "./_helpers/fakes.ts"
+import { createCapturingTransport, flush } from "./_helpers/fakes.ts"
+import {
+  BUNKER_PK,
+  BUNKER_SK,
+  CLIENT_PK,
+  createHarness,
+  fakeTools,
+  isConnectRequestBody,
+  isRequestIdBody,
+  makeSigned,
+  USER_PK,
+} from "./_helpers/client-harness.ts"
 
-const CLIENT_SK = new Uint8Array(32).fill(1)
-const BUNKER_SK = new Uint8Array(32).fill(2)
-const CLIENT_PK = parsePublicKey("c".repeat(64))
-const BUNKER_PK = parsePublicKey("b".repeat(64))
-const USER_PK = parsePublicKey("f".repeat(64))
-const RELAY = parseRelayUrl("ws://127.0.0.1:0")
-
-const pubkeyOf = (sk: Uint8Array): PublicKey => sk[0] === 1 ? CLIENT_PK : BUNKER_PK
-
-const makeSigned = (base: UnsignedEvent, pubkey: string): NostrEvent => ({
-  ...base,
-  id: parseEventId("0".repeat(64)),
-  pubkey: parsePublicKey(pubkey),
-  sig: parseSig("0".repeat(128)),
-})
-
-interface RequestIdBody {
-  readonly id: string
-}
-
-const isRequestIdBody = (value: unknown): value is RequestIdBody =>
-  typeof value === "object" && value !== null && "id" in value && typeof value.id === "string"
-
-interface ConnectRequestBody {
-  readonly method: string
-  readonly params: ReadonlyArray<string>
-}
-
-const isConnectRequestBody = (value: unknown): value is ConnectRequestBody =>
-  typeof value === "object" && value !== null &&
-  "method" in value && typeof value.method === "string" &&
-  "params" in value && Array.isArray(value.params)
-
-const fakeTools = makeFakeTools(pubkeyOf)
-
-interface Harness {
-  readonly signer: ReturnType<typeof createNip46ClientSigner>
-  readonly published: ReadonlyArray<NostrEvent>
-  readonly publishedRelays: ReadonlyArray<RelayUrl>
-  readonly injectBunkerResponse: (
-    requestIndex: number,
-    response: { result?: string; error?: string },
-    fromPubkey?: PublicKey,
-  ) => void
-  readonly deliver: (event: NostrEvent) => void
-  readonly rejectPublishes: () => void
-}
-
-const createHarness = (
-  opts: {
-    secret?: string | null
-    timeoutMs?: number
-    initialUserPubkey?: typeof USER_PK | null
-    relayUrls?: ReadonlyArray<RelayUrl>
-    verifyEventSignature?: (event: NostrEvent) => Promise<boolean>
-    onPubkeyMismatch?: (expected: PublicKey, actual: PublicKey) => void
-    onAuthChallenge?: (url: string) => void
-  } = {},
-): Harness => {
-  const { transport, published, publishedRelays, deliver, rejectPublishes } = createCapturingTransport()
-
+Deno.test("createNip46ClientSigner - builds a bunker-kind signer whose restored pubkey needs no request", async () => {
+  const { transport, published } = createCapturingTransport()
   const signer = createNip46ClientSigner({
     tools: fakeTools,
     transport,
-    clientSecretKey: CLIENT_SK,
+    clientSecretKey: new Uint8Array(32).fill(1),
     remoteSignerPubkey: BUNKER_PK,
-    relayUrls: opts.relayUrls ?? [RELAY],
-    secret: opts.secret ?? null,
-    initialUserPubkey: opts.initialUserPubkey ?? null,
-    timeoutMs: opts.timeoutMs ?? 30_000,
-    verifyEventSignature: opts.verifyEventSignature ?? ((): Promise<boolean> => Promise.resolve(true)),
-    onPubkeyMismatch: opts.onPubkeyMismatch,
-    onAuthChallenge: opts.onAuthChallenge,
-    generateRequestId: (() => {
-      let n = 0
-      return () => `req-${++n}`
-    })(),
+    relayUrls: [relayUrlFixture("wss://relay.example")],
+    secret: null,
+    initialUserPubkey: USER_PK,
   })
 
-  const injectBunkerResponse = (
-    requestIndex: number,
-    response: { result?: string; error?: string },
-    fromPubkey: PublicKey = pubkeyOf(BUNKER_SK),
-  ): void => {
-    const requestEvent = published[requestIndex]
-    if (!requestEvent) throw new Error(`no request at index ${requestIndex}`)
-    const decoded = fakeTools.nip44Decrypt(new Uint8Array(32), requestEvent.content)
-    const parsed: unknown = JSON.parse(decoded)
-    assert(isRequestIdBody(parsed))
-    const responseBody = { id: parsed.id, ...response }
-    const responseEnvelope: UnsignedEvent = {
-      kind: KIND_NOSTR_CONNECT,
-      created_at: now(),
-      tags: [["p", CLIENT_PK]],
-      content: fakeTools.nip44Encrypt(new Uint8Array(32), JSON.stringify(responseBody)),
-    }
-    const signed = makeSigned(responseEnvelope, fromPubkey)
-    deliver(signed)
-  }
-
-  return { signer, published, publishedRelays, injectBunkerResponse, deliver, rejectPublishes }
-}
-
+  assertEquals(signer.kind, "bunker")
+  assertEquals(await signer.getPublicKey(), ok(USER_PK))
+  assertEquals(published.length, 0)
+})
 Deno.test("signEvent - resolves with bunker-signed event when response matches request id", async () => {
   const h = createHarness({ initialUserPubkey: USER_PK })
 
@@ -128,17 +44,16 @@ Deno.test("signEvent - resolves with bunker-signed event when response matches r
   h.injectBunkerResponse(0, { result: JSON.stringify(signedByBunker) })
 
   const result = await signPromise
-  assertEquals(result.content, "hello")
-  assertEquals(result.pubkey, USER_PK)
+  assertEquals(result, ok(signedByBunker))
 })
 
-Deno.test("signEvent - throws PubkeyMismatchError when returned pubkey differs from known user pubkey", async () => {
+Deno.test("signEvent - returns pubkey-mismatch when returned pubkey differs from known user pubkey", async () => {
   const h = createHarness()
 
   const getPublicKeyPromise = h.signer.getPublicKey()
   await flush()
   h.injectBunkerResponse(0, { result: USER_PK })
-  assertEquals(await getPublicKeyPromise, USER_PK)
+  assertEquals(await getPublicKeyPromise, ok(USER_PK))
 
   const unsigned: UnsignedEvent = { kind: 1, created_at: 100, tags: [], content: "hello" }
   const signPromise = h.signer.signEvent(unsigned)
@@ -147,10 +62,11 @@ Deno.test("signEvent - throws PubkeyMismatchError when returned pubkey differs f
   const wrongSigned = makeSigned(unsigned, "d".repeat(64))
   h.injectBunkerResponse(1, { result: JSON.stringify(wrongSigned) })
 
-  await assertRejects(() => signPromise, PubkeyMismatchError)
+  const result = await signPromise
+  assertEquals(!result.success && result.error.type, "pubkey-mismatch")
 })
 
-Deno.test("signEvent - fires onPubkeyMismatch callback before throwing", async () => {
+Deno.test("signEvent - fires onPubkeyMismatch callback when returning pubkey-mismatch", async () => {
   const calls: Array<{ expected: string; actual: string }> = []
   const h = createHarness({
     initialUserPubkey: USER_PK,
@@ -165,7 +81,7 @@ Deno.test("signEvent - fires onPubkeyMismatch callback before throwing", async (
   const wrongSigned = makeSigned(unsigned, wrongPubkey)
   h.injectBunkerResponse(0, { result: JSON.stringify(wrongSigned) })
 
-  await assertRejects(() => signPromise, PubkeyMismatchError)
+  await signPromise
   assertEquals(calls.length, 1)
   const [call] = calls
   if (!call) throw new Error("expected one onPubkeyMismatch call")
@@ -191,10 +107,10 @@ Deno.test("signEvent - does not fire onPubkeyMismatch on success", async () => {
   assertEquals(calls.length, 0)
 })
 
-Deno.test("signEvent - rejects when the bunker-signed event fails signature verification", async () => {
+Deno.test("signEvent - returns sign-failed when the bunker-signed event fails signature verification", async () => {
   const h = createHarness({
     initialUserPubkey: USER_PK,
-    verifyEventSignature: () => Promise.resolve(false),
+    verifyEventSignature: () => false,
   })
 
   const unsigned: UnsignedEvent = { kind: 1, created_at: 100, tags: [], content: "hello" }
@@ -204,24 +120,50 @@ Deno.test("signEvent - rejects when the bunker-signed event fails signature veri
   const signedByBunker = makeSigned(unsigned, USER_PK)
   h.injectBunkerResponse(0, { result: JSON.stringify(signedByBunker) })
 
-  await assertRejects(() => signPromise, SigningError, "invalid signature")
+  assertEquals(
+    await signPromise,
+    failure({ type: "sign-failed", message: "bunker returned an event with an invalid signature" }),
+  )
 })
 
-Deno.test("signEvent - rejects with SigningError on timeout", async () => {
+Deno.test("signEvent - returns disconnected on timeout", async () => {
   const h = createHarness({ timeoutMs: 20, initialUserPubkey: USER_PK })
 
   const unsigned: UnsignedEvent = { kind: 1, created_at: 100, tags: [], content: "hello" }
-  const signPromise = h.signer.signEvent(unsigned)
 
-  await assertRejects(() => signPromise, SigningError, "timed out")
+  assertEquals(
+    await h.signer.signEvent(unsigned),
+    failure({ type: "disconnected", message: "bunker request timed out" }),
+  )
 })
 
-Deno.test("signEvent - rejects when called before connect", async () => {
+Deno.test("signEvent - returns disconnected when called before connect", async () => {
   const h = createHarness()
 
   const unsigned: UnsignedEvent = { kind: 1, created_at: 100, tags: [], content: "hello" }
 
-  await assertRejects(() => h.signer.signEvent(unsigned), SigningError, "not connected")
+  const result = await h.signer.signEvent(unsigned)
+  assertEquals(!result.success && result.error.type, "disconnected")
+})
+
+Deno.test("signEvent - returns rejected when the bunker's error says the user declined", async () => {
+  const h = createHarness({ initialUserPubkey: USER_PK })
+
+  const signPromise = h.signer.signEvent({ kind: 1, created_at: 100, tags: [], content: "hello" })
+  await flush()
+  h.injectBunkerResponse(0, { error: "user rejected" })
+
+  assertEquals(await signPromise, failure({ type: "rejected", message: "user rejected" }))
+})
+
+Deno.test("signEvent - returns sign-failed carrying a bunker error that does not say the user declined", async () => {
+  const h = createHarness({ initialUserPubkey: USER_PK })
+
+  const signPromise = h.signer.signEvent({ kind: 1, created_at: 100, tags: [], content: "hello" })
+  await flush()
+  h.injectBunkerResponse(0, { error: "signing failed" })
+
+  assertEquals(await signPromise, failure({ type: "sign-failed", message: "signing failed" }))
 })
 
 Deno.test("concurrent requests are correlated by id and do not cross", async () => {
@@ -237,15 +179,15 @@ Deno.test("concurrent requests are correlated by id and do not cross", async () 
   const signedB = makeSigned(unsignedB, USER_PK)
   h.injectBunkerResponse(1, { result: JSON.stringify(signedB) })
   const resultB = await signPromiseB
-  assertEquals(resultB.content, "B")
+  assertEquals(resultB.success && resultB.value.content, "B")
 
   const signedA = makeSigned(unsignedA, USER_PK)
   h.injectBunkerResponse(0, { result: JSON.stringify(signedA) })
   const resultA = await signPromiseA
-  assertEquals(resultA.content, "A")
+  assertEquals(resultA.success && resultA.value.content, "A")
 })
 
-Deno.test("disconnect - rejects in-flight requests and removes subscription", async () => {
+Deno.test("disconnect - settles in-flight requests as disconnected", async () => {
   const h = createHarness({ initialUserPubkey: USER_PK })
 
   const unsigned: UnsignedEvent = { kind: 1, created_at: 100, tags: [], content: "x" }
@@ -254,7 +196,7 @@ Deno.test("disconnect - rejects in-flight requests and removes subscription", as
 
   h.signer.disconnect()
 
-  await assertRejects(() => signPromise, SigningError, "disconnected")
+  assertEquals(await signPromise, failure({ type: "disconnected", message: "bunker disconnected" }))
 })
 
 Deno.test("connect - sends connect with secret and fetches user pubkey", async () => {
@@ -270,31 +212,33 @@ Deno.test("connect - sends connect with secret and fetches user pubkey", async (
   assertEquals(decoded.method, "connect")
   assertEquals(decoded.params, [BUNKER_PK, "s1"])
   h.injectBunkerResponse(0, { result: "ack" })
+  await flush()
+  h.injectBunkerResponse(1, { result: "null" })
 
   await flush()
-  assertEquals(h.published.length, 2)
-  h.injectBunkerResponse(1, { result: USER_PK })
+  assertEquals(h.published.length, 3)
+  h.injectBunkerResponse(2, { result: USER_PK })
 
-  await connectPromise
-  assertEquals(await h.signer.getPublicKey(), USER_PK)
+  assertEquals(await connectPromise, ok(undefined))
+  assertEquals(await h.signer.getPublicKey(), ok(USER_PK))
 })
 
 Deno.test("connect - skips RPC when initialUserPubkey is provided (reload path)", async () => {
   const h = createHarness({ secret: "s1", initialUserPubkey: USER_PK })
 
-  await h.signer.connect()
+  assertEquals(await h.signer.connect(), ok(undefined))
   assertEquals(h.published.length, 0)
-  assertEquals(await h.signer.getPublicKey(), USER_PK)
+  assertEquals(await h.signer.getPublicKey(), ok(USER_PK))
 })
 
-Deno.test("connect - rejects when bunker returns error on connect", async () => {
+Deno.test("connect - returns public-key-failed carrying the bunker's error on connect", async () => {
   const h = createHarness({ secret: "wrong" })
 
   const connectPromise = h.signer.connect()
   await flush()
   h.injectBunkerResponse(0, { error: "invalid secret" })
 
-  await assertRejects(() => connectPromise, SigningError, "invalid secret")
+  assertEquals(await connectPromise, failure({ type: "public-key-failed", message: "invalid secret" }))
 })
 
 Deno.test("getClientPubkey - returns the ephemeral client pubkey derived from secret key", () => {
@@ -317,17 +261,20 @@ Deno.test("auth_url response fires onAuthChallenge and leaves the request pendin
   const signed = makeSigned(unsigned, USER_PK)
   h.injectBunkerResponse(0, { result: JSON.stringify(signed) })
   const result = await signPromise
-  assertEquals(result.content, "hi")
+  assertEquals(result.success && result.value.content, "hi")
 })
 
-Deno.test("auth_url response without onAuthChallenge rejects with a clear error", async () => {
+Deno.test("auth_url response without onAuthChallenge returns a clear failure", async () => {
   const h = createHarness({ initialUserPubkey: USER_PK })
 
   const signPromise = h.signer.signEvent({ kind: 1, created_at: 100, tags: [], content: "hi" })
   await flush()
   h.injectBunkerResponse(0, { result: "auth_url", error: "https://auth.example/approve" })
 
-  await assertRejects(() => signPromise, SigningError, "requires authentication")
+  assertEquals(
+    await signPromise,
+    failure({ type: "sign-failed", message: "bunker requires authentication: https://auth.example/approve" }),
+  )
 })
 
 Deno.test("nip44Encrypt returns a disconnected failure when the request times out", async () => {
@@ -335,7 +282,7 @@ Deno.test("nip44Encrypt returns a disconnected failure when the request times ou
 
   const result = await h.signer.nip44Encrypt(USER_PK, "secret")
   if (result.success) throw new Error("expected failure")
-  assertEquals(result.error.tag, "disconnected")
+  assertEquals(result.error.type, "disconnected")
 })
 
 Deno.test("nip44Encrypt fails immediately when no relay accepts the request envelope", async () => {
@@ -344,7 +291,7 @@ Deno.test("nip44Encrypt fails immediately when no relay accepts the request enve
 
   const result = await h.signer.nip44Encrypt(USER_PK, "secret")
   if (result.success) throw new Error("expected failure")
-  assertEquals(result.error.tag, "disconnected")
+  assertEquals(result.error.type, "disconnected")
 })
 
 Deno.test("nip44Encrypt fails immediately when there is no relay to publish to", async () => {
@@ -352,17 +299,15 @@ Deno.test("nip44Encrypt fails immediately when there is no relay to publish to",
 
   const result = await h.signer.nip44Encrypt(USER_PK, "secret")
   if (result.success) throw new Error("expected failure")
-  assertEquals(result.error.tag, "disconnected")
+  assertEquals(result.error.type, "disconnected")
 })
 
-Deno.test("signEvent rejects immediately when no relay accepts the request envelope", async () => {
+Deno.test("signEvent returns disconnected immediately when no relay accepts the request envelope", async () => {
   const h = createHarness({ initialUserPubkey: USER_PK })
   h.rejectPublishes()
 
-  await assertRejects(
-    () => h.signer.signEvent({ kind: 1, created_at: now(), tags: [], content: "hello" }),
-    SigningError,
-  )
+  const result = await h.signer.signEvent({ kind: 1, created_at: now(), tags: [], content: "hello" })
+  assertEquals(!result.success && result.error.type, "disconnected")
 })
 
 Deno.test("nip44Encrypt maps a bunker error response to encrypt-failed", async () => {
@@ -374,7 +319,7 @@ Deno.test("nip44Encrypt maps a bunker error response to encrypt-failed", async (
 
   const result = await resultPromise
   if (result.success) throw new Error("expected failure")
-  assertEquals(result.error.tag, "encrypt-failed")
+  assertEquals(result.error.type, "encrypt-failed")
   assertEquals(result.error.message, "nope")
 })
 
@@ -387,7 +332,17 @@ Deno.test("nip44Decrypt maps a bunker error response to decrypt-failed", async (
 
   const result = await resultPromise
   if (result.success) throw new Error("expected failure")
-  assertEquals(result.error.tag, "decrypt-failed")
+  assertEquals(result.error.type, "decrypt-failed")
+})
+
+Deno.test("nip44Decrypt returns rejected when the bunker's error says the user denied it", async () => {
+  const h = createHarness({ initialUserPubkey: USER_PK })
+
+  const resultPromise = h.signer.nip44Decrypt(USER_PK, "cipher")
+  await flush()
+  h.injectBunkerResponse(0, { error: "permission denied" })
+
+  assertEquals(await resultPromise, failure({ type: "rejected", message: "permission denied" }))
 })
 
 Deno.test("ignores a response from an author other than the remote signer", async () => {
@@ -398,29 +353,30 @@ Deno.test("ignores a response from an author other than the remote signer", asyn
   await flush()
 
   const forged = makeSigned(unsigned, USER_PK)
-  h.injectBunkerResponse(0, { result: JSON.stringify(forged) }, parsePublicKey("d".repeat(64)))
+  h.injectBunkerResponse(0, { result: JSON.stringify(forged) }, publicKeyFixture("d".repeat(64)))
 
-  await assertRejects(() => signPromise, SigningError, "timed out")
+  assertEquals(await signPromise, failure({ type: "disconnected", message: "bunker request timed out" }))
 })
 
 Deno.test("publishes each request to every configured relay", async () => {
-  const relayA = parseRelayUrl("ws://127.0.0.1:1")
-  const relayB = parseRelayUrl("ws://127.0.0.1:2")
+  const relayA = relayUrlFixture("ws://127.0.0.1:1")
+  const relayB = relayUrlFixture("ws://127.0.0.1:2")
   const h = createHarness({ initialUserPubkey: USER_PK, relayUrls: [relayA, relayB] })
 
-  h.signer.signEvent({ kind: 1, created_at: 100, tags: [], content: "x" }).catch(() => {})
+  const pendingSign = h.signer.signEvent({ kind: 1, created_at: 100, tags: [], content: "x" })
   await flush()
 
   assertEquals(h.published.length, 2)
   assertEquals([...h.publishedRelays].sort(), [relayA, relayB].sort())
 
   h.signer.disconnect()
+  await pendingSign
 })
 
 Deno.test("subscription filter targets kind 24133 addressed to client", async () => {
   const h = createHarness({ initialUserPubkey: USER_PK })
 
-  h.signer.signEvent({ kind: 1, created_at: 100, tags: [], content: "x" }).catch(() => {})
+  const pendingSign = h.signer.signEvent({ kind: 1, created_at: 100, tags: [], content: "x" })
   await flush()
 
   assert(h.published.length >= 1)
@@ -430,6 +386,7 @@ Deno.test("subscription filter targets kind 24133 addressed to client", async ()
   assertEquals(publishedEvent.tags[0], ["p", BUNKER_PK])
 
   h.signer.disconnect()
+  await pendingSign
 })
 
 Deno.test("a NIP-04 response teaches the client the bunker's cipher for subsequent requests", async () => {
@@ -456,10 +413,9 @@ Deno.test("a NIP-04 response teaches the client the bunker's cipher for subseque
   }, BUNKER_PK))
 
   const result = await firstPromise
-  assertEquals(result.content, "one")
+  assertEquals(result.success && result.value.content, "one")
 
   const secondPromise = h.signer.signEvent({ kind: 1, created_at: 101, tags: [], content: "two" })
-  const secondRejection = assertRejects(() => secondPromise, SigningError)
   await flush()
 
   const secondRequest = h.published[1]
@@ -467,5 +423,14 @@ Deno.test("a NIP-04 response teaches the client the bunker's cipher for subseque
   assert(secondRequest.content.startsWith("NIP04:"), "second request follows the learned NIP-04 cipher")
 
   h.signer.disconnect()
-  await secondRejection
+  assertEquals((await secondPromise).success, false)
+})
+
+Deno.test("signEvent - rejects with InvalidArgumentError for a template that is not a NIP-01 event, sending no request", async () => {
+  const h = createHarness({ initialUserPubkey: USER_PK })
+  for (const template of [{ kind: 70000, created_at: 1 }, { kind: 1, created_at: 1.5 }, { kind: 1, created_at: -5 }]) {
+    await assertRejects(() => h.signer.signEvent({ ...template, content: "", tags: [] }), InvalidArgumentError)
+  }
+  await flush()
+  assertEquals(h.published.length, 0)
 })

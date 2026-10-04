@@ -1,310 +1,385 @@
-import type { NostrEvent, PublicKey, RelayUrl, Signer, Tag, UnsignedEvent } from "@innis/nostr-core"
+import type { EventId, NostrEvent, PublicKey, RelayUrl, Result, Signer } from "@innis/nostr-core"
 import {
   constantTimeEqual,
-  isRecord,
-  isValidPublicKey,
-  isValidTagsArray,
+  failure,
+  InvalidArgumentError,
   KIND_NOSTR_CONNECT,
   now as defaultNow,
-  reportUnhandledError,
-  tryParseJson,
+  ok,
 } from "@innis/nostr-core"
+import { reportUnhandledError } from "./unhandled-error.ts"
+import { createBoundedMap } from "./bounded-map.ts"
+import { type BunkerSession, createBunkerSession } from "./bunker-session.ts"
+import { formatBunkerUrl } from "./bunker-url.ts"
+import type { NostrConnectUrl } from "./nostr-connect-url.ts"
+import {
+  answerDetail,
+  type Nip46Permission,
+  parseCipherDetail,
+  parseSignEventDetail,
+  type PendingRequest,
+  type PendingRequestDetail,
+  permissionFor,
+  USER_REJECTED,
+} from "./pending-request.ts"
 import {
   CLOCK_SKEW_TOLERANCE_SECONDS,
   decryptEnvelopeJson,
-  type EnvelopeCipher,
+  isNip46CryptoMethod,
   type Nip46Request,
   type Nip46Response,
+  type Nip46SendFailure,
   parseRequest,
   sendEnvelope,
-  signerCryptoMethodFor,
 } from "./protocol.ts"
-import { formatBunkerUrl } from "./bunker-url.ts"
 import type { Nip46Subscription, Nip46SubscriptionStatus, Nip46Transport } from "./transport.ts"
 
-/** A `sign_event` request body as received from a client — the fields the bunker will sign, with optional parts defaulted at approval time. */
-export interface UnsignedEventInput {
-  /** The event kind the client wants signed. */
-  readonly kind: number
-  /** The event timestamp; defaults to the approval-time clock when omitted. */
-  readonly created_at?: number
-  /** The event tags; defaults to an empty list when omitted. */
-  readonly tags?: ReadonlyArray<Tag>
-  /** The event content; defaults to an empty string when omitted. */
-  readonly content?: string
-}
-
-/** A queued `sign_event` request awaiting the user's approval or rejection. */
-export interface PendingSignRequest {
-  /** The NIP-46 request id, echoed back in the response so the client can correlate it. */
-  readonly id: string
-  /** The public key of the client that sent the request. */
-  readonly clientPubkey: PublicKey
-  /** When the request was received, from the injected clock — used to order the queue newest-first. */
-  readonly receivedAt: number
-  /** The event the client is asking to have signed. */
-  readonly eventToSign: UnsignedEventInput
-}
+export type {
+  CipherDetail,
+  GetPublicKeyDetail,
+  Nip46Permission,
+  PendingRequest,
+  PendingRequestDetail,
+  SignEventDetail,
+  UnsignedEventInput,
+} from "./pending-request.ts"
 
 /** Dependencies for {@link createNip46Bunker}. */
 export interface BunkerDeps {
   /** The Nostr-on-the-wire port the bunker subscribes and publishes on. */
   readonly transport: Nip46Transport
-  /** The signer that actually approves requests (a NIP-07, local, or other `Signer`). */
+  /** The signer that answers requests as the user (a NIP-07, local, or other `Signer`). */
   readonly signer: Signer
+  /**
+   * Whether the host has granted `permission` to the connected client `clientPubkey`. Asked for every
+   * `get_public_key`, `sign_event` and `nip04_*` / `nip44_*` request: a granted request is answered at once, an
+   * ungranted one is queued for {@link Nip46Bunker.approve} or {@link Nip46Bunker.reject}. A host that wants to
+   * decide everything by hand returns `false`.
+   */
+  readonly isAuthorised: (clientPubkey: PublicKey, permission: Nip46Permission) => boolean
   /** Clock returning Unix seconds; injectable for tests. Defaults to the core `now`. */
-  readonly now?: () => number
+  readonly now?: (() => number) | undefined
+  /**
+   * Fired when a client connects with the bunker's current secret. The secret is used up from then on — a later
+   * `connect` presenting it is ignored — and {@link Nip46Bunker.getBunkerUrl} returns `null` until
+   * {@link Nip46Bunker.issueSecret} supplies a fresh one. The host persists `clientPubkey` to
+   * {@link Nip46Bunker.restorePairing} it after a restart, and replaces its stored secret so it never starts with a
+   * used one.
+   */
+  readonly onSecretUsed?: ((secret: string, clientPubkey: PublicKey) => void) | undefined
 }
 
-/** The signer-side (bunker) role: subscribes to incoming requests, queues `sign_event`s for approval, and answers over the transport. */
+/** The signer-side (bunker) role: subscribes to incoming requests, answers or queues them, and replies over the transport. */
 export interface Nip46Bunker {
-  /** Begins serving as a remote signer for `userPubkey` on `relayUrls`, gated by `secret`. A no-op if `relayUrls` is empty or `secret` is empty. */
+  /**
+   * Begins serving as a remote signer for `userPubkey` on `relayUrls`, accepting one `connect` with `secret`. Throws
+   * `InvalidArgumentError` if `relayUrls` is empty — a bunker on no relays can never be reached, so starting one is a
+   * caller's bug. A no-op if `secret` is empty. A `secret` already used is not accepted again, even across
+   * a restart of the same bunker: it serves its paired clients but advertises no URL until
+   * {@link Nip46Bunker.issueSecret}.
+   */
   readonly start: (userPubkey: PublicKey, relayUrls: ReadonlyArray<RelayUrl>, secret: string) => void
-  /** Tears down the subscription and clears all session state. */
+  /** Tears down every subscription and clears all session state; the record of used secrets is kept. */
   readonly stop: () => void
-  /** The `bunker://...` URL to paste into another device, or `null` before {@link Nip46Bunker.start}. */
+  /**
+   * Replaces the secret the next `connect` must present, retiring any unused one. Returns `false`, changing nothing,
+   * before {@link Nip46Bunker.start} or for an empty or already used secret.
+   */
+  readonly issueSecret: (secret: string) => boolean
+  /**
+   * The `bunker://...` URL to paste into another device, carrying the current unused secret — or `null` before
+   * {@link Nip46Bunker.start}, or once the secret is used until {@link Nip46Bunker.issueSecret}.
+   */
   readonly getBunkerUrl: () => string | null
-  /** The current approval queue, ordered most-recently-received first. */
-  readonly getPending: () => ReadonlyArray<PendingSignRequest>
-  /** Signs and answers the queued request with the given id; a no-op for an unknown id. */
-  readonly approve: (id: string) => Promise<void>
-  /** Declines the queued request with the given id, replying `user rejected`; a no-op for an unknown id. */
-  readonly reject: (id: string) => Promise<void>
-  /** The live subscription's {@link Nip46SubscriptionStatus} — `closed` before {@link Nip46Bunker.start} and after {@link Nip46Bunker.stop}. */
+  /** The requests awaiting a decision, ordered most-recently-received first. */
+  readonly getPending: () => ReadonlyArray<PendingRequest>
+  /**
+   * Answers the queued request with this carrier event id as its method does — the user pubkey, the signed event,
+   * the cipher result, or a correlated error when the signer declines or fails. Returns the {@link Nip46SendFailure}
+   * when the reply reached no relay; `ok` for an unknown id, which it ignores. Rejects if the transport faults.
+   */
+  readonly approve: (id: EventId) => Promise<Result<void, Nip46SendFailure>>
+  /**
+   * Declines the queued request with this carrier event id, replying `user rejected`. Returns the
+   * {@link Nip46SendFailure} when the reply reached no relay; `ok` for an unknown id, which it ignores.
+   */
+  readonly reject: (id: EventId) => Promise<Result<void, Nip46SendFailure>>
+  /**
+   * Accepts a client-initiated pairing the user pasted: the URL's client is connected from now on, its relays are
+   * listened on and answered on alongside the bunker's own, and the URL's secret is returned to it as a `connect`
+   * response. The URL's `perms` grant nothing. Returns `delivery-failed` before {@link Nip46Bunker.start}.
+   */
+  readonly acceptNostrConnect: (url: NostrConnectUrl) => Promise<Result<void, Nip46SendFailure>>
+  /**
+   * Re-establishes a pairing the host accepted before a restart, without sending the secret again: the client is
+   * connected and its relays are listened on and answered on. Returns `false` before {@link Nip46Bunker.start}.
+   */
+  readonly restorePairing: (clientPubkey: PublicKey, relays: ReadonlyArray<RelayUrl>) => boolean
+  /** The status of the subscription on the bunker's own relays — `closed` before {@link Nip46Bunker.start} and after {@link Nip46Bunker.stop}. */
   readonly getSubscriptionStatus: () => Nip46SubscriptionStatus
-  /** Registers a listener fired whenever the queue or the subscription status changes; returns an unsubscribe function. */
+  /** Registers a listener fired whenever the queue, the subscription status or the advertised secret changes; returns an unsubscribe function. */
   readonly onUpdate: (listener: () => void) => () => void
 }
 
-const SEEN_EVENT_LIMIT = 10_000
-const CLIENT_CIPHER_LIMIT = 10_000
-
-interface BoundedKeyed {
-  readonly size: number
-  readonly keys: () => IterableIterator<string>
-  readonly delete: (key: string) => boolean
+interface IncomingRequest {
+  readonly carrierId: EventId
+  readonly clientPubkey: PublicKey
+  readonly request: Nip46Request
 }
 
-const evictOldest = (tracked: BoundedKeyed, limit: number): void => {
-  if (tracked.size <= limit) return
-  const oldest = tracked.keys().next().value
-  if (oldest !== undefined) tracked.delete(oldest)
-}
+type Sent = Promise<Result<void, Nip46SendFailure>>
 
-const parseUnsignedEventInput = (value: unknown): UnsignedEventInput | null => {
-  if (!isRecord(value)) return null
-  if (typeof value.kind !== "number") return null
-  if (value.created_at !== undefined && typeof value.created_at !== "number") return null
-  if (value.content !== undefined && typeof value.content !== "string") return null
-  const tags = value.tags
-  if (tags !== undefined && !isValidTagsArray(tags)) return null
-  return { kind: value.kind, created_at: value.created_at, content: value.content, tags }
-}
+const NOT_CONNECTED = "not connected"
+const RESPONSE_TOO_LARGE = "response too large"
+const TOO_MANY_PENDING_REQUESTS = "too many pending requests"
+const OPEN_METHODS: ReadonlySet<string> = new Set(["connect", "ping"])
+const USED_SECRET_LIMIT = 10_000
 
 /**
  * Construct a {@link Nip46Bunker} — a remote signer that lets a logged-in session sign for another device.
- * It subscribes for kind 24133 requests p-tagged to the user, authenticates clients by the pairing secret
- * (`connect`), answers `ping` / `get_public_key` / `nip04_*` / `nip44_*` directly, and queues `sign_event`
- * requests for the host to {@link Nip46Bunker.approve} or {@link Nip46Bunker.reject}.
+ * It subscribes for kind 24133 requests p-tagged to the user and connects clients by the pairing secret
+ * (`connect`), each secret once, or by an accepted `nostrconnect://` URL. It answers `ping`, `switch_relays` and `logout` itself, and
+ * answers `get_public_key`, `sign_event` and the `nip04_*` / `nip44_*` methods at once when
+ * {@link BunkerDeps.isAuthorised} grants them, queueing them for the host otherwise. Every accepted request gets a
+ * correlated reply. A reply that reaches no relay is an anticipated outcome: `approve` and `reject` return it, and an
+ * automatic reply has no caller to hear it, so it is dropped and the client's own timeout is its outcome.
  */
-export const createNip46Bunker = ({ transport, signer, now = defaultNow }: BunkerDeps): Nip46Bunker => {
-  const pending = new Map<string, PendingSignRequest>()
-  const seenEventIds = new Set<string>()
-  const authenticatedClients = new Set<string>()
-  const clientEnvelopeCipher = new Map<string, EnvelopeCipher>()
+export const createNip46Bunker = (
+  { transport, signer, isAuthorised, now = defaultNow, onSecretUsed }: BunkerDeps,
+): Nip46Bunker => {
   const listeners = new Set<() => void>()
+  // Deliberate: used secrets outlive the session and are bounded; eviction can never re-admit one — see ADR-0017
+  const usedSecrets = createBoundedMap<PublicKey>(USED_SECRET_LIMIT)
 
-  let userPubkey: PublicKey | null = null
-  let relays: ReadonlyArray<RelayUrl> = []
+  let session: BunkerSession | null = null
   let secret: string | null = null
-  let subscription: Nip46Subscription | null = null
+  let subscriptions: Array<Nip46Subscription> = []
   let subscriptionStatus: Nip46SubscriptionStatus = "closed"
 
+  const callHost = (callback: () => void): void => {
+    try {
+      callback()
+    } catch (err) {
+      reportUnhandledError(err)
+    }
+  }
+
   const notify = (): void => {
-    for (const listener of listeners) {
-      try {
-        listener()
-      } catch (err) {
-        reportUnhandledError(err)
-      }
-    }
+    for (const listener of listeners) callHost(listener)
   }
 
-  const markSeen = (id: string): boolean => {
-    if (seenEventIds.has(id)) return false
-    seenEventIds.add(id)
-    evictOldest(seenEventIds, SEEN_EVENT_LIMIT)
-    return true
-  }
-
-  const sendResponse = async (
-    clientPubkey: PublicKey,
-    payload: Nip46Response,
-  ): Promise<void> => {
-    const cipher = clientEnvelopeCipher.get(clientPubkey) ?? "nip44"
-    const sent = await sendEnvelope({ signer, transport, relays, peerPubkey: clientPubkey, payload, cipher, now })
-    if (!sent.success) {
-      reportUnhandledError(new Error(`NIP-46 response not sent (${cipher}): ${sent.error.message}`))
-    }
-  }
-
-  const isAuthenticated = (clientPubkey: PublicKey): boolean =>
-    secret !== null && authenticatedClients.has(clientPubkey)
-
-  const queueSignRequest = async (clientPubkey: PublicKey, request: Nip46Request): Promise<void> => {
-    const rawJson = request.params[0]
-    if (!rawJson) {
-      await sendResponse(clientPubkey, { id: request.id, error: "missing event" })
-      return
-    }
-    const eventToSign = parseUnsignedEventInput(tryParseJson(rawJson))
-    if (!eventToSign) {
-      await sendResponse(clientPubkey, { id: request.id, error: "invalid event" })
-      return
-    }
-    pending.set(request.id, { id: request.id, clientPubkey, receivedAt: now(), eventToSign })
-    notify()
-  }
-
-  const dispatch = async (clientPubkey: PublicKey, request: Nip46Request): Promise<void> => {
-    if (request.method === "connect") {
-      // Some clients leave the remote-signer pubkey empty and rely on the secret; the request is
-      // already bound to this signer by its `#p` tag, so only a different, non-empty pubkey is wrong.
-      const requestedSigner = request.params[0] ?? ""
-      if (requestedSigner !== "" && requestedSigner !== userPubkey) {
-        return sendResponse(clientPubkey, { id: request.id, error: "invalid signer" })
-      }
-      const providedSecret = request.params[1] ?? ""
-      if (secret === null || !constantTimeEqual(providedSecret, secret)) {
-        return sendResponse(clientPubkey, { id: request.id, error: "invalid secret" })
-      }
-      authenticatedClients.add(clientPubkey)
-      return sendResponse(clientPubkey, { id: request.id, result: "ack" })
-    }
-    if (request.method === "ping") {
-      return sendResponse(clientPubkey, { id: request.id, result: "pong" })
-    }
-    if (!isAuthenticated(clientPubkey)) {
-      return sendResponse(clientPubkey, { id: request.id, error: "not connected" })
-    }
-    if (request.method === "get_public_key") {
-      return sendResponse(
-        clientPubkey,
-        userPubkey === null ? { id: request.id, error: "not connected" } : { id: request.id, result: userPubkey },
-      )
-    }
-    if (request.method === "switch_relays") {
-      // The bunker's relay set is fixed at `start`; clients that gate their handshake on this method
-      // (e.g. Flotilla) only need a non-error reply to proceed, and the request already reached us on
-      // a shared relay, so acknowledge without changing what we listen on.
-      return sendResponse(clientPubkey, { id: request.id, result: "ack" })
-    }
-    const cryptoMethod = signerCryptoMethodFor(request.method)
-    if (cryptoMethod) {
-      const [targetPubkey, payload] = request.params
-      if (!targetPubkey || payload === undefined || !isValidPublicKey(targetPubkey)) {
-        return sendResponse(clientPubkey, { id: request.id, error: "invalid params" })
-      }
-      const result = await signer[cryptoMethod](targetPubkey, payload)
-      return sendResponse(
-        clientPubkey,
-        result.success ? { id: request.id, result: result.value } : { id: request.id, error: "encryption failed" },
-      )
-    }
-    if (request.method === "sign_event") {
-      return queueSignRequest(clientPubkey, request)
-    }
-    return sendResponse(clientPubkey, { id: request.id, error: `unsupported method: ${request.method}` })
-  }
-
-  const handleEvent = async (event: NostrEvent): Promise<void> => {
-    if (!markSeen(event.id)) return
-    const decoded = await decryptEnvelopeJson({
+  const seal = (active: BunkerSession, clientPubkey: PublicKey, payload: Nip46Response): Sent =>
+    sendEnvelope({
       signer,
-      peerPubkey: event.pubkey,
-      ciphertext: event.content,
-      preferredCipher: clientEnvelopeCipher.get(event.pubkey) ?? "nip44",
+      transport,
+      relays: active.relaysFor(clientPubkey),
+      peerPubkey: clientPubkey,
+      payload,
+      cipher: active.cipherFor(clientPubkey),
+      now,
     })
-    if (!decoded) return
-    clientEnvelopeCipher.set(event.pubkey, decoded.cipher)
-    evictOldest(clientEnvelopeCipher, CLIENT_CIPHER_LIMIT)
+
+  const respond = async (active: BunkerSession, clientPubkey: PublicKey, response: Nip46Response): Sent => {
+    const sent = await seal(active, clientPubkey, response)
+    if (sent.success || sent.error.type !== "encrypt-failed" || response.result === undefined) return sent
+    // Deliberate: a result too large to seal is replaced by a small correlated error so the client is not left waiting — see ADR-0004
+    return seal(active, clientPubkey, { id: response.id, error: RESPONSE_TOO_LARGE })
+  }
+
+  const reply = (active: BunkerSession, incoming: IncomingRequest, response: Omit<Nip46Response, "id">): Sent =>
+    respond(active, incoming.clientPubkey, { ...response, id: incoming.request.id })
+
+  const answer = async (active: BunkerSession, request: PendingRequest): Sent =>
+    respond(
+      active,
+      request.clientPubkey,
+      await answerDetail(request.detail, request.requestId, { signer, userPubkey: active.userPubkey, now }),
+    )
+
+  // Deliberate: an ungranted request is queued for the host to decide, never refused — see ADR-0011
+  const decide = (active: BunkerSession, incoming: IncomingRequest, detail: PendingRequestDetail): Sent => {
+    const request: PendingRequest = {
+      id: incoming.carrierId,
+      requestId: incoming.request.id,
+      clientPubkey: incoming.clientPubkey,
+      receivedAt: now(),
+      detail,
+    }
+    if (isAuthorised(incoming.clientPubkey, permissionFor(detail))) return answer(active, request)
+    if (!active.queue(request)) return reply(active, incoming, { error: TOO_MANY_PENDING_REQUESTS })
+    notify()
+    return Promise.resolve(ok(undefined))
+  }
+
+  const reconnect = (active: BunkerSession, incoming: IncomingRequest, usedBy: PublicKey): Sent => {
+    // Deliberate: the client that used a secret is acknowledged again, anyone else ignored — see ADR-0017
+    if (usedBy === incoming.clientPubkey && active.isAuthenticated(usedBy)) {
+      return reply(active, incoming, { result: "ack" })
+    }
+    return Promise.resolve(ok(undefined))
+  }
+
+  const useSecret = (active: BunkerSession, incoming: IncomingRequest, used: string): Sent => {
+    usedSecrets.set(used, incoming.clientPubkey)
+    secret = null
+    active.authenticate(incoming.clientPubkey)
+    if (onSecretUsed) callHost(() => onSecretUsed(used, incoming.clientPubkey))
+    notify()
+    return reply(active, incoming, { result: "ack" })
+  }
+
+  const connect = (active: BunkerSession, incoming: IncomingRequest): Sent => {
+    const [requestedSigner = "", providedSecret = ""] = incoming.request.params
+    // Deliberate: an empty signer key is accepted on the secret alone, as some deployed clients send it — see ADR-0016
+    if (requestedSigner !== "" && requestedSigner !== active.userPubkey) {
+      return reply(active, incoming, { error: "invalid signer" })
+    }
+    const usedBy = usedSecrets.get(providedSecret)
+    if (usedBy !== undefined) return reconnect(active, incoming, usedBy)
+    if (secret === null || !constantTimeEqual(providedSecret, secret)) {
+      return reply(active, incoming, { error: "invalid secret" })
+    }
+    return useSecret(active, incoming, secret)
+  }
+
+  const logout = (active: BunkerSession, incoming: IncomingRequest): Sent => {
+    const sent = reply(active, incoming, { result: "ack" })
+    active.deauthenticate(incoming.clientPubkey)
+    return sent
+  }
+
+  const signEvent = (active: BunkerSession, incoming: IncomingRequest): Sent => {
+    const detail = parseSignEventDetail(incoming.request.params[0])
+    return detail === null ? reply(active, incoming, { error: "invalid event" }) : decide(active, incoming, detail)
+  }
+
+  const dispatch = (active: BunkerSession, incoming: IncomingRequest): Sent => {
+    const { method, params } = incoming.request
+    if (!OPEN_METHODS.has(method) && !active.isAuthenticated(incoming.clientPubkey)) {
+      return reply(active, incoming, { error: NOT_CONNECTED })
+    }
+    switch (method) {
+      case "connect":
+        return connect(active, incoming)
+      case "ping":
+        return reply(active, incoming, { result: "pong" })
+      case "switch_relays":
+        // Deliberate: reports the signer's own relays and switches nothing — see ADR-0012
+        return reply(active, incoming, { result: JSON.stringify(active.relays) })
+      case "logout":
+        return logout(active, incoming)
+      case "get_public_key":
+        return decide(active, incoming, { method })
+      case "sign_event":
+        return signEvent(active, incoming)
+    }
+    if (!isNip46CryptoMethod(method)) return reply(active, incoming, { error: `unsupported method: ${method}` })
+    const detail = parseCipherDetail(method, params)
+    return detail === null ? reply(active, incoming, { error: "invalid params" }) : decide(active, incoming, detail)
+  }
+
+  const handleEvent = async (active: BunkerSession, event: NostrEvent): Promise<void> => {
+    if (!active.rememberSeen(event.id)) return
+    const decoded = await decryptEnvelopeJson({ signer, peerPubkey: event.pubkey, ciphertext: event.content })
+    if (decoded === null || session !== active) return
+    active.recordCipher(event.pubkey, decoded.cipher)
     const request = parseRequest(decoded.value)
-    if (!request) return
-    await dispatch(event.pubkey, request)
+    if (request === null) return
+    await dispatch(active, { carrierId: event.id, clientPubkey: event.pubkey, request })
+  }
+
+  const listenOn = (
+    active: BunkerSession,
+    relays: ReadonlyArray<RelayUrl>,
+    onStatus?: (status: Nip46SubscriptionStatus) => void,
+  ): void => {
+    if (relays.length === 0) return
+    subscriptions.push(transport.subscribe({
+      filter: { kinds: [KIND_NOSTR_CONNECT], "#p": [active.userPubkey], since: now() - CLOCK_SKEW_TOLERANCE_SECONDS },
+      relays,
+      onEvent: (event) => {
+        handleEvent(active, event).catch(reportUnhandledError)
+      },
+      onStatus,
+    }))
+  }
+
+  const pair = (active: BunkerSession, clientPubkey: PublicKey, relays: ReadonlyArray<RelayUrl>): void => {
+    active.recordRelays(clientPubkey, relays)
+    active.authenticate(clientPubkey)
+    listenOn(active, active.startListeningOn(relays))
   }
 
   const stop = (): void => {
-    if (subscription) {
-      subscription.abort()
-      subscription = null
-    }
-    userPubkey = null
+    for (const subscription of subscriptions) subscription.abort()
+    subscriptions = []
+    session = null
     secret = null
-    relays = []
-    pending.clear()
-    seenEventIds.clear()
-    authenticatedClients.clear()
-    clientEnvelopeCipher.clear()
     subscriptionStatus = "closed"
     notify()
   }
 
-  const start = (pubkey: PublicKey, relayUrls: ReadonlyArray<RelayUrl>, bunkerSecret: string): void => {
+  const start = (userPubkey: PublicKey, relayUrls: ReadonlyArray<RelayUrl>, initialSecret: string): void => {
     stop()
-    if (relayUrls.length === 0 || bunkerSecret.length === 0) return
-    userPubkey = pubkey
-    relays = [...relayUrls]
-    secret = bunkerSecret
-    subscription = transport.subscribe({
-      filter: { kinds: [KIND_NOSTR_CONNECT], "#p": [pubkey], since: now() - CLOCK_SKEW_TOLERANCE_SECONDS },
-      relays,
-      onEvent: (event) => {
-        handleEvent(event).catch(reportUnhandledError)
-      },
-      onStatus: (status) => {
-        subscriptionStatus = status
-        notify()
-      },
+    if (relayUrls.length === 0) throw new InvalidArgumentError("a bunker cannot start on an empty relay set")
+    if (initialSecret.length === 0) return
+    const active = createBunkerSession({ userPubkey, relays: [...relayUrls] })
+    session = active
+    secret = usedSecrets.has(initialSecret) ? null : initialSecret
+    listenOn(active, active.relays, (status) => {
+      subscriptionStatus = status
+      notify()
     })
   }
 
-  const getSubscriptionStatus = (): Nip46SubscriptionStatus => subscriptionStatus
-
-  const getBunkerUrl = (): string | null => {
-    if (!userPubkey || relays.length === 0 || !secret) return null
-    return formatBunkerUrl({ remoteSignerPubkey: userPubkey, relays, secret })
-  }
-
-  const getPending = (): ReadonlyArray<PendingSignRequest> =>
-    [...pending.values()].sort((a, b) => b.receivedAt - a.receivedAt)
-
-  const approve = async (id: string): Promise<void> => {
-    const request = pending.get(id)
-    if (!request) return
-    pending.delete(id)
-    notify()
-    try {
-      const unsigned: UnsignedEvent = {
-        kind: request.eventToSign.kind,
-        created_at: request.eventToSign.created_at ?? now(),
-        tags: request.eventToSign.tags ?? [],
-        content: request.eventToSign.content ?? "",
-      }
-      const signed = await signer.signEvent(unsigned)
-      await sendResponse(request.clientPubkey, { id: request.id, result: JSON.stringify(signed) })
-    } catch (err) {
-      reportUnhandledError(err)
-      await sendResponse(request.clientPubkey, { id: request.id, error: "signing failed" })
+  const acceptNostrConnect = (url: NostrConnectUrl): Sent => {
+    const active = session
+    if (active === null) {
+      return Promise.resolve(failure({ type: "delivery-failed", message: "the bunker is not started" }))
     }
+    pair(active, url.clientPubkey, url.relays)
+    return respond(active, url.clientPubkey, { id: globalThis.crypto.randomUUID(), result: url.secret })
   }
 
-  const reject = async (id: string): Promise<void> => {
-    const request = pending.get(id)
-    if (!request) return
-    pending.delete(id)
-    notify()
-    await sendResponse(request.clientPubkey, { id: request.id, error: "user rejected" })
+  const restorePairing = (clientPubkey: PublicKey, relays: ReadonlyArray<RelayUrl>): boolean => {
+    const active = session
+    if (active === null) return false
+    pair(active, clientPubkey, relays)
+    return true
   }
+
+  const issueSecret = (fresh: string): boolean => {
+    if (session === null || fresh.length === 0 || usedSecrets.has(fresh)) return false
+    secret = fresh
+    notify()
+    return true
+  }
+
+  const getBunkerUrl = (): string | null =>
+    session === null || secret === null ? null : formatBunkerUrl({
+      remoteSignerPubkey: session.userPubkey,
+      relays: session.relays,
+      secret,
+    })
+
+  const getPending = (): ReadonlyArray<PendingRequest> =>
+    [...(session?.pending() ?? [])].sort((a, b) => b.receivedAt - a.receivedAt)
+
+  const settle = (id: EventId, respondTo: (active: BunkerSession, request: PendingRequest) => Sent): Sent => {
+    const active = session
+    const request = active?.take(id)
+    if (active === null || request === undefined) return Promise.resolve(ok(undefined))
+    notify()
+    return respondTo(active, request)
+  }
+
+  const approve = (id: EventId): Sent => settle(id, answer)
+
+  const reject = (id: EventId): Sent =>
+    settle(
+      id,
+      (active, request) => respond(active, request.clientPubkey, { id: request.requestId, error: USER_REJECTED }),
+    )
 
   const onUpdate = (listener: () => void): () => void => {
     listeners.add(listener)
@@ -313,5 +388,17 @@ export const createNip46Bunker = ({ transport, signer, now = defaultNow }: Bunke
     }
   }
 
-  return Object.freeze({ start, stop, getBunkerUrl, getPending, approve, reject, getSubscriptionStatus, onUpdate })
+  return Object.freeze({
+    start,
+    stop,
+    issueSecret,
+    getBunkerUrl,
+    getPending,
+    approve,
+    reject,
+    acceptNostrConnect,
+    restorePairing,
+    getSubscriptionStatus: (): Nip46SubscriptionStatus => subscriptionStatus,
+    onUpdate,
+  })
 }

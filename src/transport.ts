@@ -17,7 +17,7 @@ export interface Nip46SubscribeOptions {
   /** Invoked once per received event. De-duplication across relays is the caller's responsibility. */
   readonly onEvent: (event: NostrEvent) => void
   /** Invoked on every {@link Nip46SubscriptionStatus} transition, beginning with the subscription's initial state. */
-  readonly onStatus?: (status: Nip46SubscriptionStatus) => void
+  readonly onStatus?: ((status: Nip46SubscriptionStatus) => void) | undefined
 }
 
 /** Handle to a live subscription returned by {@link Nip46Transport.subscribe}. */
