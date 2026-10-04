@@ -19,3 +19,4 @@ In a `bunker://` pairing the client sends `connect` with the bunker's secret, an
 - There are exactly two ways a client becomes connected: a `connect` request carrying the bunker's current, unused secret (ADR-0017), and an accepted `nostrconnect://` URL. `restorePairing` re-establishes a connection one of them made.
 - In this flow the secret proves the signer to the client; it is not a credential the bunker checks.
 - Once connected, a client is a client: nothing distinguishes a client-initiated pairing afterwards. Only the host's own records know which pairings to restore.
+- Shared decision: nostr-adrs ADR-0115.

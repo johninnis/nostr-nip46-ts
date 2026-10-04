@@ -17,3 +17,4 @@ When a valid challenge (ADR-0009) arrives and no `onAuthChallenge` is supplied, 
 - A host without a way to show the page learns why the request failed, and when, rather than waiting out the timeout.
 - The failure carries the URL, so a host can still offer it to the user by other means.
 - A challenge that is not a web URL is dropped either way (ADR-0009), so this failure never carries a non-web URL.
+- Shared decision: nostr-adrs ADR-0112.
