@@ -33,6 +33,7 @@ interface Nip46ClientSignerDeps {
     readonly onPubkeyMismatch?: (expected: PublicKey, actual: PublicKey) => void
     readonly onAuthChallenge?: (url: string) => void // bunker asked the user to authorise at this URL
     readonly clientMetadata?: Nip46ClientMetadata    // { name, url, image }, sent with a bunker:// connect
+    readonly requestedPerms?: ReadonlyArray<Nip46Permission> // asked for with a bunker:// connect — a hint, never a grant
 }
 
 interface Nip46ClientSigner extends Signer {
@@ -53,7 +54,7 @@ Each call to `signEvent` / `nip44Encrypt` / `nip44Decrypt` / `nip04Encrypt` / `n
 4. Wait on a single subscription spanning all relays (`kinds: [24133], authors: [remoteSignerPubkey], #p: [clientPubkey]`) for the response with the matching `id`. Responses from any author other than `remoteSignerPubkey` are ignored, so a third party cannot inject a reply even if it learns the client pubkey.
 5. Decrypt the response envelope, surface `result` / `error`. An event redelivered by several relays is handled once: the client remembers the last 10,000 event ids it has seen and drops a repeat before decrypting it.
 
-`connect()` runs the initial NIP-46 `connect` handshake with the pairing secret — and, when `clientMetadata` has anything in it, the JSON-stringified metadata as `optional_client_metadata`, after an empty permission list, so the bunker can label the connection — then asks the bunker to `switch_relays`, then fetches the user pubkey through the same `getPublicKey()` the public method uses — one acquisition path, no duplicated handshake logic. It returns `Promise<Result<void, SignerFailure>>`. **Must succeed before any signing call** — a `signEvent` made before it returns `disconnected`. `disconnect()` settles all pending requests with a `disconnected` failure and tears down the transport subscription.
+`connect()` runs the initial NIP-46 `connect` handshake with the pairing secret — plus any `requestedPerms` as `optional_requested_perms` and, when `clientMetadata` has anything in it, the JSON-stringified metadata as `optional_client_metadata`, so the bunker can label the connection — then asks the bunker to `switch_relays`, then fetches the user pubkey through the same `getPublicKey()` the public method uses — one acquisition path, no duplicated handshake logic. It returns `Promise<Result<void, SignerFailure>>`. **Must succeed before any signing call** — a `signEvent` made before it returns `disconnected`. `disconnect()` settles all pending requests with a `disconnected` failure and tears down the transport subscription.
 
 **Switching relays.** Straight after the connection is established, `connect()` sends `switch_relays`. A list with at least one valid relay replaces the client's relays: every later request goes there and the subscription is reopened there. `null`, an error, a timeout or an unusable answer keeps the client's own relays and the handshake carries on. `getRelayUrls()` returns the relays in use — persist them with the session, because a restored session (`initialUserPubkey`) does not ask again.
 
@@ -92,7 +93,7 @@ interface BunkerDeps {
 
 Lets a logged-in app session act as a remote signer for another device. Subscribes to incoming NIP-46 requests, answers or queues them, and exposes:
 
-- `start(userPubkey, relayUrls, secret)` / `stop()` — lifecycle. The bunker subscribes on every URL in `relayUrls` and answers on all of them. `start` is a no-op if `relayUrls` is empty or `secret` is empty — a bunker without a pairing secret would authenticate anyone, so it refuses to run.
+- `start(userPubkey, relayUrls, secret)` / `stop()` — lifecycle. The bunker subscribes on every URL in `relayUrls` and answers on all of them. `start` throws `InvalidArgumentError` if `relayUrls` is empty — a bunker on no relays can never be reached, so that is a caller's bug — and is a no-op if `secret` is empty: a bunker without a pairing secret would authenticate anyone, so it refuses to run.
 - `getBunkerUrl()` — emits the `bunker://...?relay=&relay=&secret=` URL the user pastes into another device (one `relay=` param per relay), or `null` once its secret has been used.
 - `issueSecret(secret)` — makes `secret` the one the next `connect` must present, retiring any unused one. Returns `false` before `start`, or for an empty or already used secret.
 - `acceptNostrConnect(url)` — accepts a client-initiated pairing: pass `parseNostrConnectUrl(pasted)` once the user agrees. The client is connected from then on, its relays are listened on and answered on alongside the bunker's own, and the URL's secret is sent back to it as a `connect` response. The URL's `perms`, `name`, `url` and `image` are the client's unauthenticated description of itself — show them, but they grant nothing. `restorePairing(clientPubkey, relays)` re-establishes such a pairing after a restart without sending the secret again.

@@ -42,6 +42,7 @@ const isOptionalString = (value: unknown): value is string | null | undefined =>
 
 export const parseRequest = (value: Readonly<Record<string, unknown>>): Nip46Request | null => {
   if (!isNonEmptyString(value.id) || !isNonEmptyString(value.method)) return null
+  // Deliberate: an absent params member reads as an empty list, an explicit null is refused — see ADR-0016
   const rawParams = value.params === undefined ? [] : value.params
   if (!Array.isArray(rawParams)) return null
   // Deliberate: a non-string param is normalised to its JSON form, for clients that send sign_event's event as an object — see ADR-0016
