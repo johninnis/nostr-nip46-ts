@@ -6,6 +6,24 @@ import { ATTACKER_PK, CLIENT_PK, createHarness, USER_PK } from "./_helpers/bunke
 
 const SIGN_EVENT = JSON.stringify({ kind: 1, content: "hi" })
 
+Deno.test("bunker - drops a request envelope whose signature fails verification, without remembering it", async () => {
+  let verdict = true
+  const h = createHarness("supersecret", { verifyEventSignature: () => verdict })
+  try {
+    const envelope = await h.envelope(CLIENT_PK, { id: "s1", method: "ping" })
+    verdict = false
+    h.deliver(envelope)
+    await flush()
+    assertEquals(h.published.length, 0)
+    verdict = true
+    h.deliver(envelope)
+    await flush()
+    assertEquals(h.lastResponse()?.result, "pong")
+  } finally {
+    h.stop()
+  }
+})
+
 Deno.test("bunker - two clients using the same request id are queued and answered independently", async () => {
   const h = createHarness("supersecret")
   try {

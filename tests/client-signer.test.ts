@@ -110,7 +110,7 @@ Deno.test("signEvent - does not fire onPubkeyMismatch on success", async () => {
 Deno.test("signEvent - returns sign-failed when the bunker-signed event fails signature verification", async () => {
   const h = createHarness({
     initialUserPubkey: USER_PK,
-    verifyEventSignature: () => false,
+    verifyEventSignature: (event) => event.kind === KIND_NOSTR_CONNECT,
   })
 
   const unsigned: UnsignedEvent = { kind: 1, created_at: 100, tags: [], content: "hello" }
@@ -135,6 +135,43 @@ Deno.test("signEvent - returns disconnected on timeout", async () => {
     await h.signer.signEvent(unsigned),
     failure({ type: "disconnected", message: "bunker request timed out" }),
   )
+})
+
+Deno.test("signEvent - ignores a response envelope whose signature fails verification", async () => {
+  const h = createHarness({ timeoutMs: 20, initialUserPubkey: USER_PK, verifyEventSignature: () => false })
+
+  const unsigned: UnsignedEvent = { kind: 1, created_at: 100, tags: [], content: "hello" }
+  const signPromise = h.signer.signEvent(unsigned)
+  await flush()
+  h.injectBunkerResponse(0, { result: JSON.stringify(makeSigned(unsigned, USER_PK)) })
+
+  assertEquals(
+    await signPromise,
+    failure({ type: "disconnected", message: "bunker request timed out" }),
+  )
+})
+
+Deno.test("signEvent - a response envelope whose signature fails verification is dropped without being remembered", async () => {
+  let verdict = true
+  const h = createHarness({ timeoutMs: 500, initialUserPubkey: USER_PK, verifyEventSignature: () => verdict })
+
+  const unsigned: UnsignedEvent = { kind: 1, created_at: 100, tags: [], content: "hello" }
+  const signPromise = h.signer.signEvent(unsigned)
+  let settled = false
+  void signPromise.then(() => settled = true)
+  await flush()
+
+  const envelope = (() => {
+    verdict = false
+    return h.injectBunkerResponse(0, { result: JSON.stringify(makeSigned(unsigned, USER_PK)) })
+  })()
+  await flush()
+  assertEquals(settled, false)
+
+  verdict = true
+  h.deliver(envelope)
+  const result = await signPromise
+  assertEquals(result.success && result.value.content, "hello")
 })
 
 Deno.test("signEvent - returns disconnected when called before connect", async () => {

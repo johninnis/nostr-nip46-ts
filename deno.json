@@ -1,6 +1,6 @@
 {
   "name": "@innis/nostr-nip46",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "publish": {
     "exclude": ["tests/", "deno.lock", ".github/"]
   },

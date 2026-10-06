@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Superseded by ADR-0021. The rule below argued key custody of the payload but left `created_at` and the event id unauthenticated — a replay opening against id-based deduplication — and contradicted NIP-44's MUST that the event signature be validated before decrypting. ADR-0021 verifies the signature first.
 
 ## Context
 

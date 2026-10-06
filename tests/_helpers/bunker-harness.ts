@@ -49,6 +49,7 @@ export interface HarnessOptions {
   readonly now?: () => number
   readonly signer?: Signer
   readonly isAuthorised?: (client: PublicKey, permission: Nip46Permission) => boolean
+  readonly verifyEventSignature?: (event: NostrEvent) => boolean
   readonly onSecretUsed?: (secret: string, clientPubkey: PublicKey) => void
 }
 
@@ -89,6 +90,7 @@ export const createHarness = (secret: string, options: HarnessOptions = {}): Har
     signer: bunkerSigner,
     isAuthorised: options.isAuthorised ?? grantAllButSigning,
     now: options.now,
+    verifyEventSignature: options.verifyEventSignature ?? ((): boolean => true),
     onSecretUsed: options.onSecretUsed,
   })
   bunker.start(USER_PK, [RELAY], secret)

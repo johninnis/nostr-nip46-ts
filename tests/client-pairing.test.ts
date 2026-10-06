@@ -162,6 +162,7 @@ Deno.test("nostrconnect pairing round-trips between the client signer and the bu
     transport,
     signer: createLocalSigner(BUNKER_SK, fakeTools),
     isAuthorised: () => true,
+    verifyEventSignature: () => true,
   })
   bunker.start(BUNKER_PK, [relayUrlFixture("wss://signer.example")], "bunker-secret")
   const client = createNip46ClientSigner({

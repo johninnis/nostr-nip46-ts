@@ -6,6 +6,7 @@ import {
   KIND_NOSTR_CONNECT,
   now as defaultNow,
   ok,
+  verifyEventSignature as defaultVerifyEventSignature,
 } from "@innis/nostr-core"
 import { reportUnhandledError } from "./unhandled-error.ts"
 import { createBoundedMap } from "./bounded-map.ts"
@@ -59,6 +60,8 @@ export interface BunkerDeps {
   readonly isAuthorised: (clientPubkey: PublicKey, permission: Nip46Permission) => boolean
   /** Clock returning Unix seconds; injectable for tests. Defaults to the core `now`. */
   readonly now?: (() => number) | undefined
+  /** Verifier for the Schnorr signature of inbound request events, checked before deduplication and decryption. Defaults to the core `verifyEventSignature`. */
+  readonly verifyEventSignature?: ((event: NostrEvent) => boolean) | undefined
   /**
    * Fired when a client connects with the bunker's current secret. The secret is used up from then on — a later
    * `connect` presenting it is ignored — and {@link Nip46Bunker.getBunkerUrl} returns `null` until
@@ -145,7 +148,14 @@ const USED_SECRET_LIMIT = 10_000
  * automatic reply has no caller to hear it, so it is dropped and the client's own timeout is its outcome.
  */
 export const createNip46Bunker = (
-  { transport, signer, isAuthorised, now = defaultNow, onSecretUsed }: BunkerDeps,
+  {
+    transport,
+    signer,
+    isAuthorised,
+    now = defaultNow,
+    verifyEventSignature = defaultVerifyEventSignature,
+    onSecretUsed,
+  }: BunkerDeps,
 ): Nip46Bunker => {
   const listeners = new Set<() => void>()
   // Deliberate: used secrets outlive the session and are bounded; eviction can never re-admit one — see ADR-0017
@@ -279,6 +289,8 @@ export const createNip46Bunker = (
   }
 
   const handleEvent = async (active: BunkerSession, event: NostrEvent): Promise<void> => {
+    // Deliberate: the signature is verified before deduplication and decryption — it is what binds created_at and the event id a replay would freshen — see ADR-0021
+    if (!verifyEventSignature(event)) return
     if (!active.rememberSeen(event.id)) return
     const decoded = await decryptEnvelopeJson({ signer, peerPubkey: event.pubkey, ciphertext: event.content })
     if (decoded === null || session !== active) return

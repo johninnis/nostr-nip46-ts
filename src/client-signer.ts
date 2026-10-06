@@ -83,7 +83,7 @@ export interface Nip46ClientSignerDeps {
   readonly now?: () => number
   /** Factory for unique request ids. Defaults to `crypto.randomUUID()`. */
   readonly generateRequestId?: () => string
-  /** Verifier for the Schnorr signature of bunker-signed events. Defaults to the core `verifyEventSignature`. */
+  /** Verifier for the Schnorr signature of bunker-signed events, and of inbound response envelopes before deduplication and decryption. Defaults to the core `verifyEventSignature`. */
   readonly verifyEventSignature?: (event: NostrEvent) => boolean
   /** Fired when {@link Nip46ClientSigner.signEvent} returns `pubkey-mismatch` because a signed event's pubkey differs from the known user pubkey. */
   readonly onPubkeyMismatch?: ((expected: PublicKey, actual: PublicKey) => void) | undefined
@@ -294,8 +294,11 @@ export const createNip46ClientSigner = ({
   const isFromRemoteSigner = (author: PublicKey): boolean => remoteSigner === null || author === remoteSigner
 
   const handleEvent = async (event: NostrEvent): Promise<void> => {
+    if (!isFromRemoteSigner(event.pubkey)) return
+    // Deliberate: the signature is verified before deduplication and decryption — it is what binds created_at and the event id a replay would freshen — see ADR-0021
+    if (!verifyEventSignature(event)) return
     // Deliberate: redelivered events are dropped before decrypting, not left to the pending map — an auth_url challenge bypasses it — see ADR-0006
-    if (!isFromRemoteSigner(event.pubkey) || !seenEventIds.remember(event.id)) return
+    if (!seenEventIds.remember(event.id)) return
     const decoded = await decryptEnvelopeJson({
       signer: envelopeSigner,
       peerPubkey: event.pubkey,

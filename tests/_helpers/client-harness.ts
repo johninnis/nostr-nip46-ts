@@ -52,7 +52,7 @@ export interface Harness {
     requestIndex: number,
     response: { result?: string | null; error?: string | null },
     fromPubkey?: PublicKey,
-  ) => void
+  ) => NostrEvent
   readonly deliver: (event: NostrEvent) => void
   readonly rejectPublishes: () => void
   readonly breakPublishes: () => void
@@ -109,7 +109,7 @@ export const createHarness = (
     requestIndex: number,
     response: { result?: string | null; error?: string | null },
     fromPubkey: PublicKey = pubkeyOf(BUNKER_SK),
-  ): void => {
+  ): NostrEvent => {
     const requestEvent = published[requestIndex]
     if (!requestEvent) throw new Error(`no request at index ${requestIndex}`)
     const decoded = fakeTools.nip44Decrypt(new Uint8Array(32), requestEvent.content)
@@ -124,6 +124,7 @@ export const createHarness = (
     }
     const signed = makeSigned(responseEnvelope, fromPubkey)
     deliver(signed)
+    return signed
   }
 
   const requestAt = (index: number): ConnectRequestBody => {
