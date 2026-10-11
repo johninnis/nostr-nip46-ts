@@ -1,7 +1,8 @@
 import { assertEquals, equal } from "@std/assert"
-import type { UnsignedEvent } from "@innis/nostr-core"
-import { failure } from "@innis/nostr-core"
-import { flush } from "./_helpers/fakes.ts"
+import { FakeTime } from "@std/testing/time"
+import type { Result, SignerFailure, UnsignedEvent } from "@innis/nostr-core"
+import { failure, ok } from "@innis/nostr-core"
+import { elapse, flush } from "./_helpers/fakes.ts"
 import { BUNKER_PK, createHarness, makeSigned, USER_PK } from "./_helpers/client-harness.ts"
 
 interface AuthUrlVectors {
@@ -19,6 +20,11 @@ const VECTORS: AuthUrlVectors = JSON.parse(
 
 const UNSIGNED: UnsignedEvent = { kind: 1, created_at: 100, tags: [], content: "hi" }
 const NOT_A_WEB_URL = "bunker sent an authentication URL that is not a web URL"
+const APPROVAL_URL = "https://bunker.example/authorise"
+const TIMED_OUT: Result<string, SignerFailure> = failure({ type: "disconnected", message: "bunker request timed out" })
+const FIVE_MINUTES_MS = 300_000
+
+const ignoreChallenge = (): void => undefined
 
 const challengeCarrying = (error: string | null): { result: string; error?: string } =>
   error === null ? { result: "auth_url" } : { result: "auth_url", error }
@@ -107,4 +113,94 @@ Deno.test("auth_url challenge - a listener that throws is reported, and its requ
   } finally {
     globalThis.removeEventListener("error", capture)
   }
+})
+
+Deno.test("auth_url challenge - a reply after the request timeout but within the approval window settles the request", async () => {
+  const h = createHarness({
+    initialUserPubkey: USER_PK,
+    timeoutMs: 100,
+    approvalWindowMs: 1_000,
+    onAuthChallenge: ignoreChallenge,
+  })
+  const encrypting = h.signer.nip44Encrypt(BUNKER_PK, "hi")
+  await flush()
+  h.injectBunkerResponse(0, { result: "auth_url", error: APPROVAL_URL })
+  await elapse(250)
+  h.injectBunkerResponse(0, { result: "sealed" })
+  assertEquals(await encrypting, ok("sealed"))
+})
+
+Deno.test("auth_url challenge - a request still unanswered when the approval window closes fails as a timeout", async () => {
+  const h = createHarness({
+    initialUserPubkey: USER_PK,
+    timeoutMs: 100,
+    approvalWindowMs: 200,
+    onAuthChallenge: ignoreChallenge,
+  })
+  const encrypting = h.signer.nip44Encrypt(BUNKER_PK, "hi")
+  await flush()
+  h.injectBunkerResponse(0, { result: "auth_url", error: APPROVAL_URL })
+  assertEquals(await encrypting, TIMED_OUT)
+})
+
+Deno.test("auth_url challenge - a further challenge restarts the approval window", async () => {
+  const h = createHarness({
+    initialUserPubkey: USER_PK,
+    timeoutMs: 100,
+    approvalWindowMs: 400,
+    onAuthChallenge: ignoreChallenge,
+  })
+  const encrypting = h.signer.nip44Encrypt(BUNKER_PK, "hi")
+  await flush()
+  h.injectBunkerResponse(0, { result: "auth_url", error: APPROVAL_URL })
+  await elapse(250)
+  h.injectBunkerResponse(0, { result: "auth_url", error: APPROVAL_URL })
+  await elapse(250)
+  h.injectBunkerResponse(0, { result: "sealed" })
+  assertEquals(await encrypting, ok("sealed"))
+})
+
+Deno.test("auth_url challenge - a request no challenge answered times out at the request timeout, not the approval window", async () => {
+  const h = createHarness({
+    initialUserPubkey: USER_PK,
+    timeoutMs: 100,
+    approvalWindowMs: 1_000,
+    onAuthChallenge: ignoreChallenge,
+  })
+  const encrypting = h.signer.nip44Encrypt(BUNKER_PK, "hi")
+  await elapse(250)
+  h.injectBunkerResponse(0, { result: "sealed" })
+  assertEquals(await encrypting, TIMED_OUT)
+})
+
+Deno.test("auth_url challenge - the default approval window outlasts the request timeout", async () => {
+  const h = createHarness({ initialUserPubkey: USER_PK, timeoutMs: 100, onAuthChallenge: ignoreChallenge })
+  const encrypting = h.signer.nip44Encrypt(BUNKER_PK, "hi")
+  await flush()
+  h.injectBunkerResponse(0, { result: "auth_url", error: APPROVAL_URL })
+  await elapse(250)
+  h.injectBunkerResponse(0, { result: "sealed" })
+  assertEquals(await encrypting, ok("sealed"))
+})
+
+const encryptAnsweredAfterTheDefaultWindowMinus = async (
+  earlierMs: number,
+): Promise<Result<string, SignerFailure>> => {
+  using time = new FakeTime()
+  const h = createHarness({ initialUserPubkey: USER_PK, timeoutMs: 100, onAuthChallenge: ignoreChallenge })
+  const encrypting = h.signer.nip44Encrypt(BUNKER_PK, "hi")
+  await time.runMicrotasks()
+  h.injectBunkerResponse(0, { result: "auth_url", error: APPROVAL_URL })
+  await time.runMicrotasks()
+  await time.tickAsync(FIVE_MINUTES_MS - earlierMs)
+  h.injectBunkerResponse(0, { result: "sealed" })
+  return await encrypting
+}
+
+Deno.test("auth_url challenge - a reply just inside the default five-minute approval window settles the request", async () => {
+  assertEquals(await encryptAnsweredAfterTheDefaultWindowMinus(1), ok("sealed"))
+})
+
+Deno.test("auth_url challenge - a reply just outside the default five-minute approval window arrives too late", async () => {
+  assertEquals(await encryptAnsweredAfterTheDefaultWindowMinus(-1), TIMED_OUT)
 })

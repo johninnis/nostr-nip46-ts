@@ -30,6 +30,7 @@ import {
 import { reportUnhandledError } from "./unhandled-error.ts"
 import { isWebUrl } from "./auth-url.ts"
 import { createSeenEventIds } from "./bounded-map.ts"
+import { createInFlightRequests, type InFlightRequest } from "./in-flight-requests.ts"
 import { formatClientMetadata, type Nip46ClientMetadata } from "./nostr-connect-url.ts"
 import type { Nip46Permission } from "./permission.ts"
 import {
@@ -81,6 +82,14 @@ export interface Nip46ClientSignerDeps {
    * failure while the user is still looking at the request.
    */
   readonly timeoutMs?: number
+  /**
+   * How long, in milliseconds, a request waits for its real reply once an `auth_url` challenge has reached
+   * {@link Nip46ClientSignerDeps.onAuthChallenge}. Defaults to 300000 (five minutes): a person approving in a page,
+   * perhaps on another device, takes longer than a request takes on the network. Each challenge restarts the window,
+   * replacing whatever was left of `timeoutMs`; when it runs out the request fails as a timed-out one does. Without
+   * `onAuthChallenge` a challenge fails its request at once, so the window never applies.
+   */
+  readonly approvalWindowMs?: number
   /** Clock returning Unix seconds; injectable for tests. Defaults to the core `now`. */
   readonly now?: () => number
   /** Factory for unique request ids. Defaults to `crypto.randomUUID()`. */
@@ -91,10 +100,11 @@ export interface Nip46ClientSignerDeps {
   readonly onPubkeyMismatch?: ((expected: PublicKey, actual: PublicKey) => void) | undefined
   /**
    * Fired with the URL of an `auth_url` challenge so the host can open it; the request stays pending for the real
-   * reply. Only a web URL is ever passed — `http://` or `https://` and a non-empty host with no credentials and at most a
-   * decimal port, the string holding no whitespace, control character or `\` — exactly as the bunker sent it. A
-   * challenge carrying anything else fails its request at once, in the method's own failure mode, with a message that
-   * does not carry the URL. Each challenge event fires it once, however many relays deliver it.
+   * reply, for {@link Nip46ClientSignerDeps.approvalWindowMs} from this challenge. Only a web URL is ever passed —
+   * `http://` or `https://` and a non-empty host with no credentials and at most a decimal port, the string holding no
+   * whitespace, control character or `\` — exactly as the bunker sent it. A challenge carrying anything else fails its
+   * request at once, in the method's own failure mode, with a message that does not carry the URL. Each challenge
+   * event fires it once, however many relays deliver it.
    */
   readonly onAuthChallenge?: ((url: string) => void) | undefined
   /**
@@ -143,12 +153,6 @@ export interface Nip46ClientSigner extends Signer {
   readonly getRemoteSignerPubkey: () => PublicKey | null
 }
 
-interface PendingRequest {
-  readonly settle: (result: Result<string, SignerFailure>) => void
-  readonly failureType: SignerFailure["type"]
-  readonly timer: ReturnType<typeof setTimeout>
-}
-
 interface PairingWaiter {
   readonly promise: Promise<Result<void, SignerFailure>>
   readonly resolve: (result: Result<void, SignerFailure>) => void
@@ -156,6 +160,7 @@ interface PairingWaiter {
 }
 
 const AUTH_URL = "auth_url"
+const DEFAULT_APPROVAL_WINDOW_MS = 300_000
 const NOT_A_WEB_URL = "bunker sent an authentication URL that is not a web URL"
 const LOGOUT_ACK = "ack"
 
@@ -188,7 +193,8 @@ const bunkerErrorFailure = (error: string, failureType: SignerFailure["type"]): 
  * more than ten minutes before or after the client's clock is dropped.
  *
  * No method throws an anticipated outcome; each returns a `Failure(SignerFailure)`: `disconnected` when the request
- * timed out, was cut off by {@link Nip46ClientSigner.disconnect}, never reached a relay, or was made before
+ * timed out (after `timeoutMs`, or `approvalWindowMs` after the last `auth_url` challenge), was cut off by
+ * {@link Nip46ClientSigner.disconnect}, never reached a relay, or was made before
  * {@link Nip46ClientSigner.connect}; `rejected` when the bunker's error says the user declined; `pubkey-mismatch`
  * when it signed as another key; otherwise the method's own mode (`public-key-failed`, `sign-failed`,
  * `encrypt-failed`, `decrypt-failed`) carrying the bunker's error, the defect in its answer, or an `auth_url`
@@ -206,6 +212,7 @@ export const createNip46ClientSigner = ({
   secret,
   initialUserPubkey = null,
   timeoutMs = 60_000,
+  approvalWindowMs = DEFAULT_APPROVAL_WINDOW_MS,
   now = defaultNow,
   generateRequestId = () => globalThis.crypto.randomUUID(),
   verifyEventSignature = defaultVerifyEventSignature,
@@ -218,7 +225,7 @@ export const createNip46ClientSigner = ({
   const connectMetadata = formatClientMetadata(clientMetadata)
   const clientPubkey = tools.getPublicKey(clientSecretKey)
   const envelopeSigner = createLocalSigner(clientSecretKey, tools)
-  const pending = new Map<string, PendingRequest>()
+  const inFlight = createInFlightRequests(disconnected("bunker request timed out"))
   const seenEventIds = createSeenEventIds()
   let remoteSigner: PublicKey | null = remoteSignerPubkey
   let relays: ReadonlyArray<RelayUrl> = relayUrls
@@ -226,14 +233,6 @@ export const createNip46ClientSigner = ({
   let peerCipher: CipherScheme = "nip44"
   let subscription: Nip46Subscription | null = null
   let pairing: PairingWaiter | null = null
-
-  const settlePending = (id: string, result: Result<string, SignerFailure>): void => {
-    const request = pending.get(id)
-    if (!request) return
-    pending.delete(id)
-    clearTimeout(request.timer)
-    request.settle(result)
-  }
 
   const settlePairing = (result: Result<void, SignerFailure>): void => {
     const waiter = pairing
@@ -251,38 +250,40 @@ export const createNip46ClientSigner = ({
     settlePairing(ok(undefined))
   }
 
-  const handleChallenge = (response: Nip46Response, request: PendingRequest): void => {
+  const handleChallenge = (response: Nip46Response, request: InFlightRequest): void => {
     const url = response.error ?? ""
     if (!isWebUrl(url)) {
-      settlePending(response.id, failure({ type: request.failureType, message: NOT_A_WEB_URL }))
+      inFlight.settle(response.id, failure({ type: request.failureType, message: NOT_A_WEB_URL }))
       return
     }
     if (onAuthChallenge) {
+      // Deliberate: a challenge is an answer saying a person must now act, so the deadline restarts as an approval window — see ADR-0010
+      inFlight.restartDeadline(response.id, approvalWindowMs)
       onAuthChallenge(url)
       return
     }
-    settlePending(
+    inFlight.settle(
       response.id,
       failure({ type: request.failureType, message: `bunker requires authentication: ${url}` }),
     )
   }
 
   const handleResponse = (response: Nip46Response): void => {
-    const request = pending.get(response.id)
+    const request = inFlight.find(response.id)
     if (!request) return
     if (response.result === AUTH_URL) {
       handleChallenge(response, request)
       return
     }
     if (response.error !== undefined) {
-      settlePending(response.id, failure(bunkerErrorFailure(response.error, request.failureType)))
+      inFlight.settle(response.id, failure(bunkerErrorFailure(response.error, request.failureType)))
       return
     }
     if (response.result === undefined) {
-      settlePending(response.id, failure({ type: request.failureType, message: "bunker answered with no result" }))
+      inFlight.settle(response.id, failure({ type: request.failureType, message: "bunker answered with no result" }))
       return
     }
-    settlePending(response.id, ok(response.result))
+    inFlight.settle(response.id, ok(response.result))
   }
 
   const isFromRemoteSigner = (author: PublicKey): boolean => remoteSigner === null || author === remoteSigner
@@ -347,8 +348,7 @@ export const createNip46ClientSigner = ({
     ensureSubscription()
     return new Promise<Result<string, SignerFailure>>((resolve, reject) => {
       const id = generateRequestId()
-      const timer = setTimeout(() => settlePending(id, disconnected("bunker request timed out")), timeoutMs)
-      pending.set(id, { settle: resolve, failureType, timer })
+      inFlight.open(id, { settle: resolve, failureType }, timeoutMs)
       ;(async () => {
         const payload: Nip46Request = { id, method, params }
         const sent = await sendEnvelope({
@@ -362,11 +362,12 @@ export const createNip46ClientSigner = ({
         })
         if (sent.success) return
         const { type, message } = sent.error
-        settlePending(id, type === "delivery-failed" ? disconnected(message) : failure({ type: failureType, message }))
+        inFlight.settle(
+          id,
+          type === "delivery-failed" ? disconnected(message) : failure({ type: failureType, message }),
+        )
       })().catch((err: unknown) => {
-        if (!pending.delete(id)) return
-        clearTimeout(timer)
-        reject(err)
+        if (inFlight.abandon(id)) reject(err)
       })
     })
   }
@@ -410,11 +411,7 @@ export const createNip46ClientSigner = ({
       subscription.abort()
       subscription = null
     }
-    for (const { settle, timer } of pending.values()) {
-      clearTimeout(timer)
-      settle(disconnected("bunker disconnected"))
-    }
-    pending.clear()
+    inFlight.settleAll(disconnected("bunker disconnected"))
     settlePairing(disconnected("bunker disconnected"))
     userPubkey = null
   }

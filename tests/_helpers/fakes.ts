@@ -116,6 +116,9 @@ export const createLoopbackTransport = (): Nip46Transport => {
 
 const eventLoopTurn = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
 
+export const elapse = (milliseconds: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, milliseconds))
+
 export const flush = async (): Promise<void> => {
   for (let i = 0; i < 10; i++) await eventLoopTurn()
 }

@@ -65,6 +65,7 @@ export const createHarness = (
   opts: {
     secret?: string | null
     timeoutMs?: number
+    approvalWindowMs?: number
     initialUserPubkey?: typeof USER_PK | null
     relayUrls?: ReadonlyArray<RelayUrl>
     verifyEventSignature?: (event: NostrEvent) => boolean
@@ -96,6 +97,7 @@ export const createHarness = (
     secret: opts.secret ?? null,
     initialUserPubkey: opts.initialUserPubkey ?? null,
     timeoutMs: opts.timeoutMs ?? 30_000,
+    ...(opts.approvalWindowMs === undefined ? {} : { approvalWindowMs: opts.approvalWindowMs }),
     now: clock,
     verifyEventSignature: opts.verifyEventSignature ?? ((): boolean => true),
     onPubkeyMismatch: opts.onPubkeyMismatch,
