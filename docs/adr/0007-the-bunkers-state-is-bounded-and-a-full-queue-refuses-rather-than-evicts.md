@@ -10,7 +10,7 @@ The bunker accumulates state per peer while it runs: event ids seen, clients con
 
 ## Decision
 
-- The seen-id set (ADR-0006), the connected clients, the per-client ciphers and the per-client relays are each bounded at 10,000 entries, evicting the oldest first. An evicted client must connect again, exactly as after a restart; an evicted relay set means that client is answered on the bunker's own relays only.
+- The seen-id set (ADR-0006), the connected clients, the per-client ciphers and the per-client relays are each bounded at 10,000 entries, evicting the oldest first. An evicted client is no longer connected, and comes back only by a new pairing or by the host restoring it with `restorePairing`, exactly as after a restart: the secret it used is spent, and presenting it again is answered `invalid secret` (ADR-0017). An evicted relay set means that client is answered on the bunker's own relays only.
 - The queue of requests awaiting a decision is never evicted from. At 1,000 requests a new one is answered with the error `too many pending requests`.
 - All of it belongs to one session, created by `start` and discarded by `stop`. The record of used `connect` secrets is the one exception: it belongs to the bunker and outlives the session (ADR-0017).
 
@@ -19,3 +19,4 @@ The bunker accumulates state per peer while it runs: event ids seen, clients con
 - The bunker's memory is bounded whatever its peers do.
 - A client whose request cannot be queued is told so at once rather than timing out; the host drains the queue by deciding requests.
 - A reader tempted to make the queue evict like the maps do would reintroduce the silent hang. The queue carries a fence pointing here, and a test fills it and asserts the refusal.
+- Shared decisions: nostr-adrs ADR-0051 and ADR-0058.

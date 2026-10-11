@@ -72,8 +72,10 @@ export const createHarness = (
     onAuthChallenge?: (url: string) => void
     clientMetadata?: Nip46ClientMetadata
     requestedPerms?: ReadonlyArray<Nip46Permission>
+    now?: () => number
   } = {},
 ): Harness => {
+  const clock = opts.now ?? now
   const {
     transport,
     published,
@@ -94,6 +96,7 @@ export const createHarness = (
     secret: opts.secret ?? null,
     initialUserPubkey: opts.initialUserPubkey ?? null,
     timeoutMs: opts.timeoutMs ?? 30_000,
+    now: clock,
     verifyEventSignature: opts.verifyEventSignature ?? ((): boolean => true),
     onPubkeyMismatch: opts.onPubkeyMismatch,
     onAuthChallenge: opts.onAuthChallenge,
@@ -118,7 +121,7 @@ export const createHarness = (
     const responseBody = { id: parsed.id, ...response }
     const responseEnvelope: UnsignedEvent = {
       kind: KIND_NOSTR_CONNECT,
-      created_at: now(),
+      created_at: clock(),
       tags: [["p", CLIENT_PK]],
       content: fakeTools.nip44Encrypt(new Uint8Array(32), JSON.stringify(responseBody)),
     }

@@ -40,14 +40,24 @@ const isNonEmptyString = (value: unknown): value is string => typeof value === "
 const isOptionalString = (value: unknown): value is string | null | undefined =>
   value === undefined || value === null || typeof value === "string"
 
+const SIGN_EVENT_PARAM_POSITION = 0
+
+// Deliberate: only sign_event's event may arrive as a JSON object and be encoded; any other non-string param refuses the request — see ADR-0016
+const normaliseParam = (method: string, param: unknown, position: number): string | null => {
+  if (typeof param === "string") return param
+  return method === "sign_event" && position === SIGN_EVENT_PARAM_POSITION && isRecord(param)
+    ? JSON.stringify(param)
+    : null
+}
+
 export const parseRequest = (value: Readonly<Record<string, unknown>>): Nip46Request | null => {
-  if (!isNonEmptyString(value.id) || !isNonEmptyString(value.method)) return null
+  const { id, method } = value
+  if (!isNonEmptyString(id) || !isNonEmptyString(method)) return null
   // Deliberate: an absent params member reads as an empty list, an explicit null is refused — see ADR-0016
   const rawParams = value.params === undefined ? [] : value.params
   if (!Array.isArray(rawParams)) return null
-  // Deliberate: a non-string param is normalised to its JSON form, for clients that send sign_event's event as an object — see ADR-0016
-  const params = rawParams.map((param): string => typeof param === "string" ? param : JSON.stringify(param))
-  return { id: value.id, method: value.method, params }
+  const params = rawParams.map((param: unknown, position) => normaliseParam(method, param, position))
+  return params.every((param): param is string => param !== null) ? { id, method, params } : null
 }
 
 export const parseResponse = (value: Readonly<Record<string, unknown>>): Nip46Response | null => {
@@ -58,6 +68,11 @@ export const parseResponse = (value: Readonly<Record<string, unknown>>): Nip46Re
 }
 
 export const CLOCK_SKEW_TOLERANCE_SECONDS = 60
+
+const STALENESS_WINDOW_SECONDS = 600
+
+export const isStale = (createdAt: number, receivedAt: number): boolean =>
+  Math.abs(createdAt - receivedAt) > STALENESS_WINDOW_SECONDS
 
 /** The four NIP-46 methods that encrypt or decrypt a payload for a third party as the user. */
 export type Nip46CryptoMethod = "nip04_encrypt" | "nip04_decrypt" | "nip44_encrypt" | "nip44_decrypt"

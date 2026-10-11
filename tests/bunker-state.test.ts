@@ -5,6 +5,77 @@ import { flush } from "./_helpers/fakes.ts"
 import { ATTACKER_PK, CLIENT_PK, createHarness, USER_PK } from "./_helpers/bunker-harness.ts"
 
 const SIGN_EVENT = JSON.stringify({ kind: 1, content: "hi" })
+const RECEIVED_AT = 1_700_000_000
+const TEN_MINUTES = 600
+
+const pingDeliveredAt = async (offsetFromCreation: number): Promise<number> => {
+  let clock = RECEIVED_AT
+  const h = createHarness("supersecret", { now: () => clock })
+  try {
+    const envelope = await h.envelope(CLIENT_PK, { id: "t1", method: "ping" })
+    clock += offsetFromCreation
+    h.deliver(envelope)
+    await flush()
+    return h.published.length
+  } finally {
+    h.stop()
+  }
+}
+
+Deno.test("bunker - drops a request envelope created more than ten minutes before its clock, without replying", async () => {
+  assertEquals(await pingDeliveredAt(TEN_MINUTES + 1), 0)
+})
+
+Deno.test("bunker - drops a request envelope created more than ten minutes after its clock, without replying", async () => {
+  assertEquals(await pingDeliveredAt(-TEN_MINUTES - 1), 0)
+})
+
+Deno.test("bunker - answers a request envelope created exactly ten minutes before its clock", async () => {
+  assertEquals(await pingDeliveredAt(TEN_MINUTES), 1)
+})
+
+Deno.test("bunker - answers a request envelope created exactly ten minutes after its clock", async () => {
+  assertEquals(await pingDeliveredAt(-TEN_MINUTES), 1)
+})
+
+Deno.test("bunker - a stale request envelope is not remembered, so it is answered once it is within the window", async () => {
+  let clock = RECEIVED_AT
+  const h = createHarness("supersecret", { now: () => clock })
+  try {
+    const envelope = await h.envelope(CLIENT_PK, { id: "t2", method: "ping" })
+    clock -= TEN_MINUTES + 1
+    h.deliver(envelope)
+    await flush()
+    const answeredWhenStale = h.published.length
+    clock += 2
+    h.deliver(envelope)
+    await flush()
+    assertEquals({ answeredWhenStale, answered: h.published.length }, { answeredWhenStale: 0, answered: 1 })
+  } finally {
+    h.stop()
+  }
+})
+
+Deno.test("bunker - verifies a request envelope's signature before judging its age", async () => {
+  let clock = RECEIVED_AT
+  let verified = 0
+  const h = createHarness("supersecret", {
+    now: () => clock,
+    verifyEventSignature: () => {
+      verified++
+      return true
+    },
+  })
+  try {
+    const envelope = await h.envelope(CLIENT_PK, { id: "t3", method: "ping" })
+    clock += TEN_MINUTES + 1
+    h.deliver(envelope)
+    await flush()
+    assertEquals(verified, 1)
+  } finally {
+    h.stop()
+  }
+})
 
 Deno.test("bunker - drops a request envelope whose signature fails verification, without remembering it", async () => {
   let verdict = true

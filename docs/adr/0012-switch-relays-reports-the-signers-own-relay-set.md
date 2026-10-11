@@ -20,3 +20,4 @@ The reply to `switch_relays` is the JSON-encoded list of the bunker's own relays
 - For a client that paired on its own relays, the reply is the hint to migrate; a client that ignores it keeps working, because the bunker also answers it on its own relays (ADR-0014).
 - The reply is not an inventory of every relay the bunker answers that client on; it is an instruction about where to talk.
 - A reader could expect a real switch. The dispatch carries a fence pointing here, and a test asserts the reply is the bunker's own set.
+- Shared decision: nostr-adrs ADR-0056.

@@ -16,7 +16,7 @@ ADR-0001's argument — that decryption already proves the sender's key custody 
 
 `handleEvent` in both roles — the bunker's and the client signer's — verifies the inbound event's signature (`verifyEventSignature`, injectable with the core default) before the event is remembered for deduplication and before its payload is decrypted. Verification comes first so that a signature-mangled copy of a legitimate event cannot poison the seen-set. An event whose signature fails is dropped without a reply, exactly as an undecryptable one is.
 
-Both roles order their inbound gates cheapest-first: does the author match the awaited peer (where the role awaits one), is the signature valid, has this event id been seen, then decrypt. One order, both roles — anything else pays a Schnorr verification for an event a cheaper check would have dropped, or lets junk from an unexpected author occupy the seen-set.
+Both roles order their inbound gates the same way: does the author match the awaited peer (where the role awaits one), is the signature valid, is the envelope within the staleness window (ADR-0006), has this event id been seen, then decrypt. The author check is the cheapest and needs no signature to be worth making, since the envelope is dropped either way; every later check reads `created_at` or the id, which only the signature binds, so the signature comes before them. One order, both roles — anything else pays a Schnorr verification for an event a cheaper check would have dropped, judges a timestamp or an id nobody signed, or lets junk occupy the seen-set.
 
 ## Consequences
 

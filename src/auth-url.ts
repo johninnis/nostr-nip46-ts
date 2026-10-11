@@ -1,8 +1,6 @@
-// Deliberate: http(s) with a host only, stricter than the NIP's bare "URL" — the host opens it — see ADR-0009
-const WEB_PROTOCOLS: ReadonlySet<string> = new Set(["http:", "https:"])
+// Deliberate: judged on the string itself, never through a URL parser that would repair it, so it is handed over as received — see ADR-0009
+const WEB_SCHEME_AND_HOST = /^https?:\/\/[^/?#@:]+(?::[0-9]+)?(?:[/?#]|$)/i
+const WHITESPACE_CONTROL_OR_BACKSLASH = /[\p{White_Space}\p{Cc}\\]/u
 
-export const parseAuthUrl = (raw: string): string | null => {
-  if (!URL.canParse(raw)) return null
-  const url = new URL(raw)
-  return WEB_PROTOCOLS.has(url.protocol) && url.hostname.length > 0 ? url.href : null
-}
+export const isWebUrl = (raw: string): boolean =>
+  WEB_SCHEME_AND_HOST.test(raw) && !WHITESPACE_CONTROL_OR_BACKSLASH.test(raw)

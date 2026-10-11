@@ -1,6 +1,6 @@
 import { assert } from "@std/assert"
-import type { NostrEvent, PublicKey, RelayUrl, Signer } from "@innis/nostr-core"
-import { createJsonCipher, createLocalSigner, KIND_NOSTR_CONNECT } from "@innis/nostr-core"
+import type { JsonValue, NostrEvent, PublicKey, RelayUrl, Signer } from "@innis/nostr-core"
+import { createJsonCipher, createLocalSigner, KIND_NOSTR_CONNECT, now as systemNow } from "@innis/nostr-core"
 import { eventIdFixture, publicKeyFixture, relayUrlFixture, sigFixture } from "@innis/nostr-core/testing"
 import type { Nip46Bunker } from "../../src/bunker.ts"
 import { createNip46Bunker } from "../../src/bunker.ts"
@@ -42,7 +42,7 @@ export const grantAllButSigning = (_client: PublicKey, permission: Nip46Permissi
 export interface RequestBody {
   readonly id: string
   readonly method: string
-  readonly params?: ReadonlyArray<string | { readonly [field: string]: string | number }> | null
+  readonly params?: ReadonlyArray<JsonValue> | null
 }
 
 export interface HarnessOptions {
@@ -84,12 +84,13 @@ const decodeResponse = (event: NostrEvent): { plaintext: string; cipher: "nip04"
 export const createHarness = (secret: string, options: HarnessOptions = {}): Harness => {
   const capturing = createCapturingTransport()
   const bunkerSigner = options.signer ?? createLocalSigner(BUNKER_SK, fakeTools)
+  const clock = options.now ?? systemNow
 
   const bunker = createNip46Bunker({
     transport: capturing.transport,
     signer: bunkerSigner,
     isAuthorised: options.isAuthorised ?? grantAllButSigning,
-    now: options.now,
+    now: clock,
     verifyEventSignature: options.verifyEventSignature ?? ((): boolean => true),
     onSecretUsed: options.onSecretUsed,
   })
@@ -115,7 +116,7 @@ export const createHarness = (secret: string, options: HarnessOptions = {}): Har
     return {
       id: eventIdFixture(`${nextId++}`.padStart(64, "0")),
       pubkey: publicKeyFixture(clientPubkey),
-      created_at: 1700000000,
+      created_at: clock(),
       kind: KIND_NOSTR_CONNECT,
       tags: [["p", USER_PK]],
       content,

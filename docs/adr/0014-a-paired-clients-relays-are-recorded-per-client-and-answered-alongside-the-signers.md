@@ -20,3 +20,4 @@ A `nostrconnect://` pairing (ADR-0013) names the relays the client listens on, w
 - A paired client is reachable whether or not it migrates.
 - Each response goes to a bounded set of relays — the signer's and one client's — and an unrelated pairing's relays never carry another client's traffic.
 - The bunker can hold several subscriptions. A reader expecting one relay set per session will find one per client by construction; tests assert both a paired client answered on the union and an unpaired one on the bunker's own set.
+- Shared decision: nostr-adrs ADR-0056.

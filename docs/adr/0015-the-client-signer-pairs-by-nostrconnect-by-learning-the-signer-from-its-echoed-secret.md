@@ -23,3 +23,4 @@ A separate pairing function returning the signer's key would leave the host to b
 - One factory, one request path and one set of response checks serve both flows.
 - The host must call `connect()` before showing the URL, or a fast signer's response can be missed.
 - Once paired, the client asks the signer to `switch_relays` and moves to the relays it names (ADR-0018); a signer that does not answer with a list leaves it on the relays it named, where a bunker that answers on both (ADR-0014) still reaches it.
+- Shared decision: nostr-adrs ADR-0059.

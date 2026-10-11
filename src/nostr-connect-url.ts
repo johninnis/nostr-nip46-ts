@@ -34,11 +34,16 @@ export interface NostrConnectUrl extends Nip46ClientMetadata {
 
 const SCHEME = "nostrconnect://"
 
-export const clientMetadataEntries = (metadata: Nip46ClientMetadata): ReadonlyArray<[string, string]> =>
+const clientMetadataEntries = (metadata: Nip46ClientMetadata): ReadonlyArray<[string, string]> =>
   (["name", "url", "image"] as const).flatMap((key) => {
     const value = metadata[key]
     return value === null ? [] : [[key, value]]
   })
+
+export const formatClientMetadata = (metadata: Nip46ClientMetadata | undefined): string | null => {
+  const entries = metadata === undefined ? [] : clientMetadataEntries(metadata)
+  return entries.length === 0 ? null : JSON.stringify(Object.fromEntries(entries))
+}
 
 const nonEmpty = (value: string | null): string | null => {
   const trimmed = value?.trim() ?? ""

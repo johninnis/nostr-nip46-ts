@@ -27,3 +27,4 @@ The bunker has no notion of an application: a `bunker://` session has one secret
 - `isAuthorised` is required, not optional: without it the bunker cannot choose between answering and asking, and neither default is safe. A host that wants the previous behaviour grants everything except `sign_event`; one that wants to decide everything by hand returns `false`.
 - The queue holds any capability request, so a queued request's `detail` is a union discriminated by `method`, and the host's approval UI must render each kind.
 - The call that chooses between answering and queueing carries a fence pointing here.
+- Shared decision: nostr-adrs ADR-0057.

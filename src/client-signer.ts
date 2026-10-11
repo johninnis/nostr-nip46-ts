@@ -12,6 +12,7 @@ import type {
 import {
   buildUnsignedEvent,
   checkPubkeyMatches,
+  checkSignedMatchesTemplate,
   constantTimeEqual,
   createLocalSigner,
   failure,
@@ -24,24 +25,25 @@ import {
   parseJson,
   parseNostrEvent,
   parsePublicKey,
-  parseRelayUrl,
   verifyEventSignature as defaultVerifyEventSignature,
 } from "@innis/nostr-core"
 import { reportUnhandledError } from "./unhandled-error.ts"
-import { parseAuthUrl } from "./auth-url.ts"
+import { isWebUrl } from "./auth-url.ts"
 import { createSeenEventIds } from "./bounded-map.ts"
-import { clientMetadataEntries, type Nip46ClientMetadata } from "./nostr-connect-url.ts"
+import { formatClientMetadata, type Nip46ClientMetadata } from "./nostr-connect-url.ts"
 import type { Nip46Permission } from "./permission.ts"
 import {
   CLOCK_SKEW_TOLERANCE_SECONDS,
   decryptEnvelopeJson,
   isEncryptMethod,
+  isStale,
   type Nip46CryptoMethod,
   type Nip46Request,
   type Nip46Response,
   parseResponse,
   sendEnvelope,
 } from "./protocol.ts"
+import { parseRelayList, sameRelays } from "./relay-list.ts"
 import type { Nip46Subscription, Nip46Transport } from "./transport.ts"
 
 export type { Nip46ClientMetadata } from "./nostr-connect-url.ts"
@@ -89,8 +91,10 @@ export interface Nip46ClientSignerDeps {
   readonly onPubkeyMismatch?: ((expected: PublicKey, actual: PublicKey) => void) | undefined
   /**
    * Fired with the URL of an `auth_url` challenge so the host can open it; the request stays pending for the real
-   * reply. Only an absolute `http:` or `https:` URL with a host is ever passed, in its normalised form; a challenge
-   * carrying anything else is dropped. Each challenge event fires it once, however many relays deliver it.
+   * reply. Only a web URL is ever passed — `http://` or `https://` and a non-empty host with no credentials and at most a
+   * decimal port, the string holding no whitespace, control character or `\` — exactly as the bunker sent it. A
+   * challenge carrying anything else fails its request at once, in the method's own failure mode, with a message that
+   * does not carry the URL. Each challenge event fires it once, however many relays deliver it.
    */
   readonly onAuthChallenge?: ((url: string) => void) | undefined
   /**
@@ -152,25 +156,10 @@ interface PairingWaiter {
 }
 
 const AUTH_URL = "auth_url"
+const NOT_A_WEB_URL = "bunker sent an authentication URL that is not a web URL"
 const LOGOUT_ACK = "ack"
 
 const disconnected = (message: string): Result<never, SignerFailure> => failure({ type: "disconnected", message })
-
-const parseRelayList = (raw: string): ReadonlyArray<RelayUrl> | null => {
-  const json = parseJson(raw)
-  if (!isOk(json) || !Array.isArray(json.value)) return null
-  const relays = json.value.map((entry: unknown) => typeof entry === "string" ? parseRelayUrl(entry) : null)
-    .filter((relay) => relay !== null)
-  return relays.length > 0 ? [...new Set(relays)] : null
-}
-
-const sameRelays = (a: ReadonlyArray<RelayUrl>, b: ReadonlyArray<RelayUrl>): boolean =>
-  a.length === b.length && a.every((relay) => b.includes(relay))
-
-const formatClientMetadata = (metadata: Nip46ClientMetadata | undefined): string | null => {
-  const entries = metadata === undefined ? [] : clientMetadataEntries(metadata)
-  return entries.length === 0 ? null : JSON.stringify(Object.fromEntries(entries))
-}
 
 const requirePairingSecret = (remoteSignerPubkey: PublicKey | null, secret: string | null): string | null => {
   if (remoteSignerPubkey !== null) return null
@@ -193,18 +182,20 @@ const bunkerErrorFailure = (error: string, failureType: SignerFailure["type"]): 
  * Construct a {@link Nip46ClientSigner}. Each `signEvent` / `nip04*` / `nip44*` call is JSON-encoded, NIP-44
  * encrypted to the remote signer, signed with the ephemeral client key, and published as a kind 24133 event
  * to every relay; the matching response is awaited on one subscription spanning all relays. `signEvent`
- * additionally checks the returned pubkey against the user pubkey ({@link Nip46ClientSignerDeps.onPubkeyMismatch})
- * and verifies the event signature before resolving. An event redelivered by several relays is handled once.
+ * additionally checks the returned pubkey against the user pubkey ({@link Nip46ClientSignerDeps.onPubkeyMismatch}),
+ * refuses an event whose kind, content, created_at or tags differ from the template it sent, and verifies the event
+ * signature before resolving. An event redelivered by several relays is handled once, and a response envelope created
+ * more than ten minutes before or after the client's clock is dropped.
  *
  * No method throws an anticipated outcome; each returns a `Failure(SignerFailure)`: `disconnected` when the request
  * timed out, was cut off by {@link Nip46ClientSigner.disconnect}, never reached a relay, or was made before
  * {@link Nip46ClientSigner.connect}; `rejected` when the bunker's error says the user declined; `pubkey-mismatch`
  * when it signed as another key; otherwise the method's own mode (`public-key-failed`, `sign-failed`,
- * `encrypt-failed`, `decrypt-failed`) carrying the bunker's error or the defect in its answer. A transport whose
- * `publish` rejects is a fault, and the call rejects with it. A template that is not a NIP-01 event is the caller's
- * fault too: `buildUnsignedEvent` refuses it before any request is sent, and `signEvent` rejects with
- * `InvalidArgumentError`, as every `Signer` does. Throws if `remoteSignerPubkey` is `null` and there is
- * no secret for a `nostrconnect://` pairing.
+ * `encrypt-failed`, `decrypt-failed`) carrying the bunker's error, the defect in its answer, or an `auth_url`
+ * challenge the host cannot open. A transport whose `publish` rejects is a fault, and the call rejects with it. A
+ * template that is not a NIP-01 event is the caller's fault too: `buildUnsignedEvent` refuses it before any request is
+ * sent, and `signEvent` rejects with `InvalidArgumentError`, as every `Signer` does. Throws if `remoteSignerPubkey` is
+ * `null` and there is no secret for a `nostrconnect://` pairing.
  */
 export const createNip46ClientSigner = ({
   tools,
@@ -261,8 +252,11 @@ export const createNip46ClientSigner = ({
   }
 
   const handleChallenge = (response: Nip46Response, request: PendingRequest): void => {
-    const url = parseAuthUrl(response.error ?? "")
-    if (url === null) return
+    const url = response.error ?? ""
+    if (!isWebUrl(url)) {
+      settlePending(response.id, failure({ type: request.failureType, message: NOT_A_WEB_URL }))
+      return
+    }
     if (onAuthChallenge) {
       onAuthChallenge(url)
       return
@@ -297,6 +291,8 @@ export const createNip46ClientSigner = ({
     if (!isFromRemoteSigner(event.pubkey)) return
     // Deliberate: the signature is verified before deduplication and decryption — it is what binds created_at and the event id a replay would freshen — see ADR-0021
     if (!verifyEventSignature(event)) return
+    // Deliberate: a stale envelope is dropped before it is remembered — the window, not the seen-set, bounds a replay — see ADR-0006
+    if (isStale(event.created_at, now())) return
     // Deliberate: redelivered events are dropped before decrypting, not left to the pending map — an auth_url challenge bypasses it — see ADR-0006
     if (!seenEventIds.remember(event.id)) return
     const decoded = await decryptEnvelopeJson({
@@ -457,6 +453,9 @@ export const createNip46ClientSigner = ({
       onPubkeyMismatch?.(userPubkey, signed.pubkey)
       return failure(mismatch)
     }
+    // Deliberate: a correctly signed event is still refused unless it is the template sent, checked before the signature — see ADR-0002
+    const differsFromTemplate = checkSignedMatchesTemplate(template, signed)
+    if (differsFromTemplate !== null) return failure(differsFromTemplate)
     if (!verifyEventSignature(signed)) {
       return failure({ type: "sign-failed", message: "bunker returned an event with an invalid signature" })
     }

@@ -25,3 +25,4 @@ A restored session (`initialUserPubkey`) performs no handshake at all.
 - A client paired on its own relays migrates to the signer's (ADR-0012, ADR-0014), and the host must store the new relays or a restored session returns to the old ones.
 - Relays change only at a handshake. A signer that moves relays mid-session is followed at the next pairing, not before.
 - A reader may expect a failed switch to fail `connect`. The call that keeps the client's relays carries a fence pointing here, and tests drive an error, `null` and an unusable list and assert the handshake completes on the client's own relays.
+- Shared decision: nostr-adrs ADR-0060.

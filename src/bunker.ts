@@ -27,6 +27,7 @@ import {
   CLOCK_SKEW_TOLERANCE_SECONDS,
   decryptEnvelopeJson,
   isNip46CryptoMethod,
+  isStale,
   type Nip46Request,
   type Nip46Response,
   type Nip46SendFailure,
@@ -64,7 +65,8 @@ export interface BunkerDeps {
   readonly verifyEventSignature?: ((event: NostrEvent) => boolean) | undefined
   /**
    * Fired when a client connects with the bunker's current secret. The secret is used up from then on — a later
-   * `connect` presenting it is ignored — and {@link Nip46Bunker.getBunkerUrl} returns `null` until
+   * `connect` presenting it is answered `invalid secret`, as a secret never issued is, except from the client that
+   * used it while that client is still connected — and {@link Nip46Bunker.getBunkerUrl} returns `null` until
    * {@link Nip46Bunker.issueSecret} supplies a fresh one. The host persists `clientPubkey` to
    * {@link Nip46Bunker.restorePairing} it after a restart, and replaces its stored secret so it never starts with a
    * used one.
@@ -75,11 +77,12 @@ export interface BunkerDeps {
 /** The signer-side (bunker) role: subscribes to incoming requests, answers or queues them, and replies over the transport. */
 export interface Nip46Bunker {
   /**
-   * Begins serving as a remote signer for `userPubkey` on `relayUrls`, accepting one `connect` with `secret`. Throws
-   * `InvalidArgumentError` if `relayUrls` is empty — a bunker on no relays can never be reached, so starting one is a
-   * caller's bug. A no-op if `secret` is empty. A `secret` already used is not accepted again, even across
-   * a restart of the same bunker: it serves its paired clients but advertises no URL until
-   * {@link Nip46Bunker.issueSecret}.
+   * Begins serving as a remote signer for `userPubkey` on `relayUrls`, accepting one `connect` with `secret`, and stops
+   * any session already running. Throws `InvalidArgumentError` if `relayUrls` is empty — a bunker on no relays can
+   * never be reached, so starting one is a caller's bug — before it does anything else, so a bunker already running
+   * keeps running untouched. An empty `secret`, or one already used (even across a restart of the same bunker), starts
+   * the bunker with no current secret: it serves and restores its paired clients but advertises no URL and connects
+   * no new client until {@link Nip46Bunker.issueSecret}.
    */
   readonly start: (userPubkey: PublicKey, relayUrls: ReadonlyArray<RelayUrl>, secret: string) => void
   /** Tears down every subscription and clears all session state; the record of used secrets is kept. */
@@ -145,7 +148,8 @@ const USED_SECRET_LIMIT = 10_000
  * answers `get_public_key`, `sign_event` and the `nip04_*` / `nip44_*` methods at once when
  * {@link BunkerDeps.isAuthorised} grants them, queueing them for the host otherwise. Every accepted request gets a
  * correlated reply. A reply that reaches no relay is an anticipated outcome: `approve` and `reject` return it, and an
- * automatic reply has no caller to hear it, so it is dropped and the client's own timeout is its outcome.
+ * automatic reply has no caller to hear it, so it is dropped and the client's own timeout is its outcome. A request
+ * envelope created more than ten minutes before or after the bunker's clock is dropped unanswered.
  */
 export const createNip46Bunker = (
   {
@@ -221,13 +225,8 @@ export const createNip46Bunker = (
     return Promise.resolve(ok(undefined))
   }
 
-  const reconnect = (active: BunkerSession, incoming: IncomingRequest, usedBy: PublicKey): Sent => {
-    // Deliberate: the client that used a secret is acknowledged again, anyone else ignored — see ADR-0017
-    if (usedBy === incoming.clientPubkey && active.isAuthenticated(usedBy)) {
-      return reply(active, incoming, { result: "ack" })
-    }
-    return Promise.resolve(ok(undefined))
-  }
+  const isStillConnectedBy = (active: BunkerSession, usedSecret: string, clientPubkey: PublicKey): boolean =>
+    usedSecrets.get(usedSecret) === clientPubkey && active.isAuthenticated(clientPubkey)
 
   const useSecret = (active: BunkerSession, incoming: IncomingRequest, used: string): Sent => {
     usedSecrets.set(used, incoming.clientPubkey)
@@ -244,8 +243,10 @@ export const createNip46Bunker = (
     if (requestedSigner !== "" && requestedSigner !== active.userPubkey) {
       return reply(active, incoming, { error: "invalid signer" })
     }
-    const usedBy = usedSecrets.get(providedSecret)
-    if (usedBy !== undefined) return reconnect(active, incoming, usedBy)
+    // Deliberate: a used secret is answered invalid secret like one never issued, save to the client still connected by it — see ADR-0017
+    if (isStillConnectedBy(active, providedSecret, incoming.clientPubkey)) {
+      return reply(active, incoming, { result: "ack" })
+    }
     if (secret === null || !constantTimeEqual(providedSecret, secret)) {
       return reply(active, incoming, { error: "invalid secret" })
     }
@@ -291,6 +292,8 @@ export const createNip46Bunker = (
   const handleEvent = async (active: BunkerSession, event: NostrEvent): Promise<void> => {
     // Deliberate: the signature is verified before deduplication and decryption — it is what binds created_at and the event id a replay would freshen — see ADR-0021
     if (!verifyEventSignature(event)) return
+    // Deliberate: a stale envelope is dropped before it is remembered — the window, not the seen-set, bounds a replay — see ADR-0006
+    if (isStale(event.created_at, now())) return
     if (!active.rememberSeen(event.id)) return
     const decoded = await decryptEnvelopeJson({ signer, peerPubkey: event.pubkey, ciphertext: event.content })
     if (decoded === null || session !== active) return
@@ -332,12 +335,12 @@ export const createNip46Bunker = (
   }
 
   const start = (userPubkey: PublicKey, relayUrls: ReadonlyArray<RelayUrl>, initialSecret: string): void => {
-    stop()
+    // Deliberate: the relay set is checked before anything else, so a faulty start leaves a running bunker untouched — see ADR-0020
     if (relayUrls.length === 0) throw new InvalidArgumentError("a bunker cannot start on an empty relay set")
-    if (initialSecret.length === 0) return
+    stop()
     const active = createBunkerSession({ userPubkey, relays: [...relayUrls] })
     session = active
-    secret = usedSecrets.has(initialSecret) ? null : initialSecret
+    secret = initialSecret.length === 0 || usedSecrets.has(initialSecret) ? null : initialSecret
     listenOn(active, active.relays, (status) => {
       subscriptionStatus = status
       notify()

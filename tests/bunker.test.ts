@@ -1,6 +1,6 @@
-import { assert, assertEquals, assertThrows } from "@std/assert"
+import { assert, assertEquals } from "@std/assert"
 import type { NostrEvent, Signer } from "@innis/nostr-core"
-import { createLocalSigner, failure, InvalidArgumentError, KIND_NOSTR_CONNECT } from "@innis/nostr-core"
+import { createLocalSigner, failure, KIND_NOSTR_CONNECT, now } from "@innis/nostr-core"
 import { eventIdFixture, sigFixture } from "@innis/nostr-core/testing"
 import { createNip46Bunker } from "../src/bunker.ts"
 import { parseBunkerUrl } from "../src/bunker-url.ts"
@@ -126,7 +126,7 @@ Deno.test("bunker - silently drops requests whose envelope decrypts as neither n
     const event: NostrEvent = {
       id: eventIdFixture("a".repeat(64)),
       pubkey: CLIENT_PK,
-      created_at: 1700000000,
+      created_at: now(),
       kind: KIND_NOSTR_CONNECT,
       tags: [["p", USER_PK]],
       content: "garbage-ciphertext-matching-neither-cipher",
@@ -224,36 +224,6 @@ Deno.test("bunker - rejects nip04_encrypt from unauthenticated client", async ()
   } finally {
     h.stop()
   }
-})
-
-Deno.test("bunker - start on an empty relay set is a fault", () => {
-  const transport: Nip46Transport = {
-    subscribe: () => ({ abort: () => {} }),
-    publish: () => Promise.resolve({ ok: true }),
-  }
-  const bunker = createNip46Bunker({
-    transport,
-    signer: createLocalSigner(BUNKER_SK, fakeTools),
-    isAuthorised: grantAllButSigning,
-  })
-
-  assertThrows(() => bunker.start(USER_PK, [], "secret"), InvalidArgumentError)
-})
-
-Deno.test("bunker - start with an empty secret is a no-op and emits no URL", () => {
-  const transport: Nip46Transport = {
-    subscribe: () => ({ abort: () => {} }),
-    publish: () => Promise.resolve({ ok: true }),
-  }
-  const bunker = createNip46Bunker({
-    transport,
-    signer: createLocalSigner(BUNKER_SK, fakeTools),
-    isAuthorised: grantAllButSigning,
-  })
-
-  bunker.start(USER_PK, [RELAY], "")
-  assertEquals(bunker.getBunkerUrl(), null)
-  bunker.stop()
 })
 
 Deno.test("bunker - URL-encodes the secret in getBunkerUrl", () => {
@@ -375,21 +345,6 @@ Deno.test("bunker - getPending returns the most recently received request first"
   }
 })
 
-Deno.test("bunker - queues a sign_event whose event arrives as a raw object, not a JSON string", async () => {
-  const h = createHarness("supersecret")
-  try {
-    await h.send(CLIENT_PK, { id: "obj1", method: "connect", params: [USER_PK, "supersecret"] })
-    await h.send(CLIENT_PK, { id: "obj2", method: "sign_event", params: [{ kind: 1, content: "from object client" }] })
-    const pending = h.pending()
-    assertEquals(pending.length, 1)
-    const detail = pending[0]?.detail
-    assert(detail?.method === "sign_event")
-    assertEquals([detail.eventToSign.kind, detail.eventToSign.content], [1, "from object client"])
-  } finally {
-    h.stop()
-  }
-})
-
 Deno.test("bunker - answers switch_relays with the JSON list of the relays it serves on", async () => {
   const h = createHarness("supersecret")
   try {
@@ -470,23 +425,3 @@ for (
     }
   })
 }
-
-Deno.test("bunker - drops a request whose params is not an array without replying", async () => {
-  const h = createHarness("supersecret")
-  try {
-    await h.send(CLIENT_PK, { id: "p1", method: "ping", params: null })
-    assertEquals(h.published.length, 0)
-  } finally {
-    h.stop()
-  }
-})
-
-Deno.test("bunker - drops a request with an empty id without replying", async () => {
-  const h = createHarness("supersecret")
-  try {
-    await h.send(CLIENT_PK, { id: "", method: "ping" })
-    assertEquals(h.published.length, 0)
-  } finally {
-    h.stop()
-  }
-})

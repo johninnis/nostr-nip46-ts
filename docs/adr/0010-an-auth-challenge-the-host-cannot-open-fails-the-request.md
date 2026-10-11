@@ -10,11 +10,13 @@ NIP-46 expects the client to show an `auth_url` challenge to the user and keep l
 
 ## Decision
 
-When a valid challenge (ADR-0009) arrives and no `onAuthChallenge` is supplied, the request fails at once with its method's own failure mode and the message `bunker requires authentication: <url>`. When `onAuthChallenge` is supplied, it is called and the request stays pending for the real reply.
+When a valid challenge (ADR-0009) arrives and no `onAuthChallenge` is supplied, the request fails at once with its method's own failure mode and the message `bunker requires authentication: <url>`, the URL exactly as the bunker sent it. When `onAuthChallenge` is supplied, it is called and the request stays pending for the real reply.
+
+The failure is the client's own, never the bunker's error, so it is not read as a decline: a URL containing `cancel` or `denied` leaves it in the method's own failure mode, not `rejected`.
 
 ## Consequences
 
 - A host without a way to show the page learns why the request failed, and when, rather than waiting out the timeout.
 - The failure carries the URL, so a host can still offer it to the user by other means.
-- A challenge that is not a web URL is dropped either way (ADR-0009), so this failure never carries a non-web URL.
+- A challenge that is not a web URL fails the request whether or not `onAuthChallenge` is supplied, with a message that carries no URL (ADR-0009), so this failure never carries a non-web URL.
 - Shared decision: nostr-adrs ADR-0112.

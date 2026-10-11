@@ -19,3 +19,4 @@ A pending request's identity is the id of the event that carried it, `PendingReq
 - Concurrent clients, or one client reusing an id, can never displace each other's queued requests.
 - `PendingRequest` carries two ids, and a reader will be tempted to merge them: one is the queue identity, the other is wire correlation. A test queues two requests sharing a request id and answers them independently.
 - Nothing changes on the wire: the response still carries exactly the id the client chose.
+- Shared decision: nostr-adrs ADR-0052.

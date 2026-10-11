@@ -6,7 +6,7 @@ Accepted
 
 ## Context
 
-A client that has sent a request is blocked on a reply carrying its request id. Several things can go wrong on the bunker's side after the request is accepted: the signer can decline or fail to sign; a `nip44_encrypt` or `nip04_encrypt` can be refused by the cipher (an empty or over-long plaintext); a decryption can fail; and sealing the response envelope can itself fail, because a large signed event, or the ciphertext of a near-maximal encrypt result, exceeds the cipher's plaintext limit (NIP-44's 4294967295 bytes since its extended length format, shared ADR-0102). Leaving any of these unanswered hangs the client until its timeout and, for an approved request, silently loses the user's decision. NIP-46 already defines an `error` reply meaning "not fulfilled".
+A client that has sent a request is blocked on a reply carrying its request id. Several things can go wrong on the bunker's side after the request is accepted: the signer can decline or fail to sign; a `nip44_encrypt` or `nip04_encrypt` can be refused by the cipher (an empty or over-long plaintext); a decryption can fail; and sealing the response envelope can itself fail, because a large signed event, or the ciphertext of a near-maximal encrypt result, exceeds the cipher's plaintext ceiling (262144 bytes, 256 KiB, by default, which a host may raise as far as NIP-44's own 4294967295; shared ADR-0102). Leaving any of these unanswered hangs the client until its timeout and, for an approved request, silently loses the user's decision. NIP-46 already defines an `error` reply meaning "not fulfilled".
 
 ## Decision
 
@@ -20,3 +20,4 @@ A client that has sent a request is blocked on a reply carrying its request id. 
 - A client always gets a reply to an accepted request: its result or an explicit error, and it can tell a user's refusal from a failure.
 - `approve` returns `ok` when the degraded `response too large` reply was delivered: the reply reached the client, even though the result did not.
 - The second seal attempt carries a one-line fence pointing here and is pinned by a test that approves an over-large result.
+- Shared decisions: nostr-adrs ADR-0041 and ADR-0047.

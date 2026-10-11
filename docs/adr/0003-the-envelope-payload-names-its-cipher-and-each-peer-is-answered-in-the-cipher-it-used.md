@@ -21,3 +21,4 @@ The `nip04_encrypt` and `nip04_decrypt` methods are unaffected: they operate on 
 - Legacy peers work, and two current implementations never use NIP-04.
 - NIP-04 has no MAC; ADR-0021 verifies the envelope's signature before decryption, which is what gives a NIP-04 envelope its integrity.
 - The per-peer cipher state exists only for this fallback. When peers that cannot speak NIP-44 no longer matter, this record is superseded and NIP-04 envelope support deleted.
+- Shared decisions: nostr-adrs ADR-0020 and ADR-0053.

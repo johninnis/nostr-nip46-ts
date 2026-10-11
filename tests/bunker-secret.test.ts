@@ -18,19 +18,18 @@ import {
 const SECRET = "0s8j2djs"
 const FRESH_SECRET = "a1b2c3d4"
 
-Deno.test("bunker - a second client presenting a used secret is ignored, not answered", async () => {
+Deno.test("bunker - a second client presenting a used secret is answered invalid secret", async () => {
   const h = createHarness(SECRET)
   try {
     await h.send(CLIENT_PK, { id: "1", method: "connect", params: [USER_PK, SECRET] })
-    const publishedAfterFirst = h.published.length
     await h.send(ATTACKER_PK, { id: "2", method: "connect", params: [USER_PK, SECRET] })
-    assertEquals(h.published.length, publishedAfterFirst)
+    assertEquals(h.lastResponse(), { id: "2", error: "invalid secret" })
   } finally {
     h.stop()
   }
 })
 
-Deno.test("bunker - a client ignored for a used secret stays unconnected", async () => {
+Deno.test("bunker - a client refused for a used secret stays unconnected", async () => {
   const h = createHarness(SECRET)
   try {
     await h.send(CLIENT_PK, { id: "1", method: "connect", params: [USER_PK, SECRET] })
@@ -53,14 +52,13 @@ Deno.test("bunker - the client that used a secret is acknowledged again when it 
   }
 })
 
-Deno.test("bunker - a client that logged out cannot reconnect with the secret it used", async () => {
+Deno.test("bunker - a client that logged out is answered invalid secret for the secret it used", async () => {
   const h = createHarness(SECRET)
   try {
     await h.send(CLIENT_PK, { id: "1", method: "connect", params: [USER_PK, SECRET] })
     await h.send(CLIENT_PK, { id: "2", method: "logout" })
-    const publishedAfterLogout = h.published.length
     await h.send(CLIENT_PK, { id: "3", method: "connect", params: [USER_PK, SECRET] })
-    assertEquals(h.published.length, publishedAfterLogout)
+    assertEquals(h.lastResponse(), { id: "3", error: "invalid secret" })
   } finally {
     h.stop()
   }
@@ -151,11 +149,10 @@ Deno.test("bunker - a used secret stays used when the bunker is restarted with i
   try {
     await h.send(CLIENT_PK, { id: "1", method: "connect", params: [USER_PK, SECRET] })
     h.bunker.start(USER_PK, [RELAY], SECRET)
-    const publishedAfterRestart = h.published.length
     await h.send(ATTACKER_PK, { id: "2", method: "connect", params: [USER_PK, SECRET] })
-    assertEquals({ url: h.bunker.getBunkerUrl(), published: h.published.length }, {
+    assertEquals({ url: h.bunker.getBunkerUrl(), response: h.lastResponse() }, {
       url: null,
-      published: publishedAfterRestart,
+      response: { id: "2", error: "invalid secret" },
     })
   } finally {
     h.stop()
