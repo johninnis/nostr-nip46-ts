@@ -276,6 +276,14 @@
     [
       "https://[::1]/authorise",
       null
+    ],
+    [
+      "http\u017f://bunker.example/",
+      null
+    ],
+    [
+      "https://bunker.example/\u180e",
+      "https://bunker.example/\u180e"
     ]
   ]
 }

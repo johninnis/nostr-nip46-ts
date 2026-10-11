@@ -45,7 +45,7 @@ const failureWithoutListener = async (error: string | null): Promise<string | nu
 }
 
 Deno.test("auth_url vectors - every shared vector is loaded", () => {
-  assertEquals(VECTORS.vectors.length, 69)
+  assertEquals(VECTORS.vectors.length, 71)
 })
 
 Deno.test("auth_url challenge - a listener is handed each shared vector's url as received, and nothing else", async () => {
